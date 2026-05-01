@@ -6,7 +6,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ${{ github.repository }}
+  #IMAGE_PREFIX: ${{ github.repository }}
+  IMAGE_PREFIX: msh3716/stock-signal_v2
 
 jobs:
   test:
