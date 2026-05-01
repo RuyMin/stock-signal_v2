@@ -7,7 +7,7 @@ on:
 env:
   REGISTRY: ghcr.io
   #IMAGE_PREFIX: ${{ github.repository }}
-  IMAGE_PREFIX: msh3716/stock-signal_v2
+  IMAGE_PREFIX: ruymin/stock-signal_v2
 
 jobs:
   test:
@@ -103,7 +103,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: msh3716
+          username: ruymin
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Skip if Dockerfile not present
@@ -148,7 +148,7 @@ jobs:
             git pull origin main
 
             echo ${{ secrets.GITHUB_TOKEN }} | \
-              docker login ghcr.io -u msh3716 --password-stdin
+              docker login ghcr.io -u ruymin --password-stdin
 
             export IMAGE_TAG=${{ github.sha }}
             docker compose -f docker-compose.yml -f docker-compose.staging.yml \
@@ -181,7 +181,7 @@ jobs:
             git pull origin main
 
             echo ${{ secrets.GITHUB_TOKEN }} | \
-              docker login ghcr.io -u msh3716 --password-stdin
+              docker login ghcr.io -u ruymin --password-stdin
 
             export IMAGE_TAG=${{ github.sha }}
             docker compose -f docker-compose.yml -f docker-compose.prod.yml \
