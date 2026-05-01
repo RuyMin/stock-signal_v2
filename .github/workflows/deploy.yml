@@ -16,12 +16,12 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
+          POSTGRES_USER: stock
+          POSTGRES_PASSWORD: codedream
           POSTGRES_DB: stock_signal_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U stock -d stock_signal_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -49,7 +49,7 @@ jobs:
       - name: Run unit tests
         env:
           PYTHONPATH: shared:backend:crewai:scheduler:workers/data_collector:workers/telegram_notifier:workers/telegram_listener
-          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/stock_signal_test
+          DATABASE_URL: postgresql+asyncpg://stock:codedream@localhost:5432/stock_signal_test
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
           OPENAI_API_KEY: test-key
           OPENAI_MODEL_NAME: gpt-4o-mini

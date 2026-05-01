@@ -99,11 +99,34 @@ docker compose exec kafka kafka-console-producer \
 # - Ubuntu 22.04 (aarch64)
 
 # 4.2 SSH 접속 후 Docker 설치
+# Ubuntu 22.04 기본 apt repo에는 docker-compose-plugin이 없음 → Docker 공식 repo 추가 필요.
 ssh ubuntu@$OCI_HOST
+
+# (1) 충돌 가능한 기존 패키지 제거
+sudo apt remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
+
+# (2) Docker 공식 GPG 키 + repo 추가
 sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# (3) Docker CE + plugin 설치
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# (4) 그룹 적용 후 재접속
 sudo usermod -aG docker $USER
-exit && ssh ubuntu@$OCI_HOST   # 그룹 적용 위해 재접속
+exit && ssh ubuntu@$OCI_HOST
+
+# (5) 검증
+docker --version
+docker compose version
 
 # 4.3 디렉토리 생성
 sudo mkdir -p /opt/vibe-staging /opt/vibe-prod
