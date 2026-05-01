@@ -1,0 +1,6 @@
+apscheduler==3.10.4
+aiokafka==0.10.0
+pydantic==2.7.0
+pydantic-settings==2.2.0
+structlog==24.1.0
+holidays==0.45

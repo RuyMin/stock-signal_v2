@@ -1,0 +1,71 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Logs
+*.log
+logs/
+
+# Secrets
+*.key
+*.pem
+secrets/
+.env.local
+.env.*.local
+.env.dev
+.env.staging
+.env.prod
+.env.test
+
+# Docker 볼륨 (호스트 마운트 시)
+postgres-data/
+kafka-data/
+loki-data/
+grafana-data/
+
+# 테스트 / 커버리지
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Claude local settings
+.claude/settings.local.json

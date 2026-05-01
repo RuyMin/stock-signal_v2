@@ -1,0 +1,75 @@
+# Kafka 토픽 정의
+# 명명 규칙: {서비스}.{리소스}.{이벤트}
+# 각 작업당 .requested / .completed / .failed 3종 사이클
+#
+# 단일 인스턴스 운영 전제: partitions=1, replication-factor=1
+# Kafka 자동 생성(KAFKA_AUTO_CREATE_TOPICS_ENABLE=true) 환경에서도
+# 본 파일을 기준으로 명시 생성하면 운영 가시성이 확보됨.
+
+topics:
+
+  # ─── 작업 1: 데이터 수집 ─────────────────────────
+  - name: stock.data.requested
+    partitions: 1
+    replication_factor: 1
+    publisher: scheduler
+    subscribers: [worker-data-collector]
+    description: 매일 15:35 KST 트리거. 한투/yfinance/네이버 수집 시작 신호.
+
+  - name: stock.data.completed
+    partitions: 1
+    replication_factor: 1
+    publisher: worker-data-collector
+    subscribers: [crewai]
+    description: 수집 완료 → CrewAI 분석 시작 트리거.
+
+  - name: stock.data.failed
+    partitions: 1
+    replication_factor: 1
+    publisher: worker-data-collector
+    subscribers: [dlq-handler]
+    description: 수집 실패 (외부 API 장애 등). DLQ.
+
+  # ─── 작업 2: AI 분석/추천 ────────────────────────
+  - name: stock.recommendation.requested
+    partitions: 1
+    replication_factor: 1
+    publisher: (reserved)
+    subscribers: []
+    description: 명시적 분석 트리거 (예약 — 현재는 stock.data.completed가 트리거 역할).
+
+  - name: stock.recommendation.completed
+    partitions: 1
+    replication_factor: 1
+    publisher: crewai
+    subscribers: [worker-telegram-notifier]
+    description: AI 분석 완료 → 알림 송신 트리거.
+
+  - name: stock.recommendation.failed
+    partitions: 1
+    replication_factor: 1
+    publisher: crewai
+    subscribers: [dlq-handler]
+    description: CrewAI 처리 실패. DLQ.
+
+  # ─── 작업 3: 알림 송신 ───────────────────────────
+  - name: stock.notify.requested
+    partitions: 1
+    replication_factor: 1
+    publisher: (reserved)
+    subscribers: []
+    description: 명시적 알림 트리거 (예약 — 현재는 stock.recommendation.completed가 트리거 역할).
+
+  - name: stock.notify.completed
+    partitions: 1
+    replication_factor: 1
+    publisher: worker-telegram-notifier
+    subscribers: []
+    description: 알림 송신 완료. 모니터링용.
+
+  - name: stock.notify.failed
+    partitions: 1
+    replication_factor: 1
+    publisher: worker-telegram-notifier
+    subscribers: [dlq-handler]
+    description: 알림 송신 실패. DLQ.

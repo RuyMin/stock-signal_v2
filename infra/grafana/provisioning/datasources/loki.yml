@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki                    # 대시보드에서 참조할 고정 UID
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      timeout: 60
+      maxLines: 1000

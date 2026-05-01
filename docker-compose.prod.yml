@@ -1,0 +1,99 @@
+# 운영환경 오버라이드
+# 사용: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d
+# 차이점:
+#   - ghcr.io 이미지 + SHA 태그 (롤백 가능)
+#   - restart: always
+#   - WARNING 로그
+#   - Grafana 외부 포트 차단 (SSH 터널로만 접근)
+#   - json-file 로그 드라이버 (회전)
+
+version: '3.9'
+
+services:
+
+  backend:
+    image: ${GHCR_IMAGE_PREFIX}/backend:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+      - BACKEND_LOG_LEVEL=WARNING
+      - CORS_ORIGINS=*
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  crewai:
+    image: ${GHCR_IMAGE_PREFIX}/crewai:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  scheduler:
+    image: ${GHCR_IMAGE_PREFIX}/scheduler:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  worker-data-collector:
+    image: ${GHCR_IMAGE_PREFIX}/worker-data-collector:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  worker-telegram-notifier:
+    image: ${GHCR_IMAGE_PREFIX}/worker-telegram-notifier:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  worker-telegram-listener:
+    image: ${GHCR_IMAGE_PREFIX}/worker-telegram-listener:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  postgres:
+    restart: always
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+
+  kafka:
+    restart: always
+
+  zookeeper:
+    restart: always
+
+  loki:
+    restart: always
+
+  promtail:
+    restart: always
+
+  grafana:
+    restart: always
+    # 운영 시 외부 포트 차단 — SSH 터널 또는 VPN으로만 접근
+    ports: !reset []
+
+volumes:
+  postgres_prod_data:

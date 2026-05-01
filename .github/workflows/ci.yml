@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: stock_signal_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: |
+          if [ -f backend/requirements.txt ]; then
+            pip install -r backend/requirements.txt
+          fi
+
+      - name: Install crewai dependencies
+        run: |
+          if [ -f crewai/requirements.txt ]; then
+            pip install -r crewai/requirements.txt
+          fi
+
+      - name: Install workers dependencies
+        run: |
+          for d in workers/data_collector workers/telegram_notifier workers/telegram_listener scheduler; do
+            if [ -f "$d/requirements.txt" ]; then
+              pip install -r "$d/requirements.txt"
+            fi
+          done
+
+      - name: Install test dependencies
+        run: |
+          if [ -f tests/requirements.txt ]; then
+            pip install -r tests/requirements.txt
+          else
+            pip install pytest pytest-asyncio pytest-cov httpx factory-boy
+          fi
+
+      - name: Run unit tests
+        env:
+          # 모듈별 디렉토리를 PYTHONPATH로 추가 (각 모듈에서 from core/from schemas 형태 import 지원)
+          PYTHONPATH: shared:backend:crewai:scheduler:workers/data_collector:workers/telegram_notifier:workers/telegram_listener
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/stock_signal_test
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          OPENAI_API_KEY: test-key
+          OPENAI_MODEL_NAME: gpt-4o-mini
+          KIS_APP_KEY: test
+          KIS_APP_SECRET: test
+          KIS_BASE_URL: https://openapi.koreainvestment.com:9443
+          TELEGRAM_BOT_TOKEN: test
+          TELEGRAM_AUTHORIZED_CHAT_ID: "0"
+          VIBE_ENV: dev
+        run: |
+          if [ -d tests/unit ]; then
+            pytest tests/unit/ -v --cov=backend --cov=workers --cov=crewai --cov=scheduler
+          else
+            echo "No tests/unit/ yet — skip (QA Engineer 단계 이전)"
+          fi

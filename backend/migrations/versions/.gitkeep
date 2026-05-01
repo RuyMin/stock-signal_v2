@@ -1,0 +1,2 @@
+# 첫 스키마 변경 시 alembic revision --autogenerate -m "..." 실행하여 첫 revision 생성.
+# 현재는 init.sql이 baseline. entrypoint.sh가 alembic stamp head로 baseline 표시 후 upgrade head 실행.

@@ -1,0 +1,63 @@
+# 스테이징 환경 오버라이드
+# 사용: docker compose -f docker-compose.yml -f docker-compose.staging.yml --env-file .env.staging up -d
+# 차이점:
+#   - ghcr.io 이미지 사용 (로컬 build 비활성화)
+#   - restart: always
+#   - INFO 로그
+#   - 영속 볼륨 (별도 staging 볼륨)
+
+version: '3.9'
+
+services:
+
+  backend:
+    image: ${GHCR_IMAGE_PREFIX}/backend:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+      - BACKEND_LOG_LEVEL=INFO
+      - CORS_ORIGINS=*
+
+  crewai:
+    image: ${GHCR_IMAGE_PREFIX}/crewai:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+
+  scheduler:
+    image: ${GHCR_IMAGE_PREFIX}/scheduler:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+
+  worker-data-collector:
+    image: ${GHCR_IMAGE_PREFIX}/worker-data-collector:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+
+  worker-telegram-notifier:
+    image: ${GHCR_IMAGE_PREFIX}/worker-telegram-notifier:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+
+  worker-telegram-listener:
+    image: ${GHCR_IMAGE_PREFIX}/worker-telegram-listener:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: always
+    environment:
+      - VIBE_ENV=staging
+
+  postgres:
+    restart: always
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_staging_data:

@@ -1,0 +1,189 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: stock_signal_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (모든 모듈)
+        run: |
+          for f in backend/requirements.txt crewai/requirements.txt \
+                   workers/data_collector/requirements.txt \
+                   workers/telegram_notifier/requirements.txt \
+                   workers/telegram_listener/requirements.txt \
+                   scheduler/requirements.txt \
+                   tests/requirements.txt; do
+            [ -f "$f" ] && pip install -r "$f"
+          done
+          pip install pytest pytest-asyncio pytest-cov httpx factory-boy
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: shared:backend:crewai:scheduler:workers/data_collector:workers/telegram_notifier:workers/telegram_listener
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/stock_signal_test
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          OPENAI_API_KEY: test-key
+          OPENAI_MODEL_NAME: gpt-4o-mini
+          KIS_APP_KEY: test
+          KIS_APP_SECRET: test
+          KIS_BASE_URL: https://openapi.koreainvestment.com:9443
+          TELEGRAM_BOT_TOKEN: test
+          TELEGRAM_AUTHORIZED_CHAT_ID: "0"
+          VIBE_ENV: dev
+        run: |
+          if [ -d tests/unit ]; then
+            pytest tests/unit/ -v
+          else
+            echo "No tests/unit/ yet — skip"
+          fi
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - { name: backend,                  context: ./backend }
+          - { name: crewai,                   context: ./crewai }
+          - { name: scheduler,                context: ./scheduler }
+          - { name: worker-data-collector,    context: ./workers/data_collector }
+          - { name: worker-telegram-notifier, context: ./workers/telegram_notifier }
+          - { name: worker-telegram-listener, context: ./workers/telegram_listener }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (ARM 크로스 빌드)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if Dockerfile not present
+        id: dockerfile-check
+        run: |
+          if [ -f "${{ matrix.context }}/Dockerfile" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Dockerfile not found at ${{ matrix.context }} — skip build (해당 엔지니어 미완료)"
+          fi
+
+      - name: Build and push (linux/arm64)
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: ${{ vars.STAGING_ENABLED == 'true' }}    # repository variable로 켜고 끔
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Staging via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USER }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/vibe-staging
+            git pull origin main
+
+            echo ${{ secrets.GITHUB_TOKEN }} | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            export IMAGE_TAG=${{ github.sha }}
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml \
+              --env-file .env.staging pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml \
+              --env-file .env.staging up -d --remove-orphans
+
+            sleep 10
+            curl -fsS http://localhost:8000/health || (echo "Health check failed" && exit 1)
+
+            docker image prune -f
+            echo "Staging deploy complete: ${{ github.sha }}"
+
+  deploy-prod:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    # staging이 활성화돼 있으면 그것을 기다리도록 설정 (선택)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Production via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USER }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/vibe-prod
+            git pull origin main
+
+            echo ${{ secrets.GITHUB_TOKEN }} | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            export IMAGE_TAG=${{ github.sha }}
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              --env-file .env.prod pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              --env-file .env.prod up -d --remove-orphans
+
+            sleep 10
+            curl -fsS http://localhost:8000/health || (echo "Health check failed" && exit 1)
+
+            docker image prune -f
+            echo "Production deploy complete: ${{ github.sha }}"

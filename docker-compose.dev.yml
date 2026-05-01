@@ -1,0 +1,74 @@
+# 개발환경 오버라이드
+# 사용: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# 차이점:
+#   - 로컬 build (이미지 미사용)
+#   - 핫리로드 (소스 코드 볼륨 마운트)
+#   - DEBUG 로그
+#   - 임시 데이터 (named volume이지만 자유롭게 down -v 가능)
+
+version: '3.9'
+
+services:
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev
+      - BACKEND_LOG_LEVEL=DEBUG
+      - CORS_ORIGINS=*
+    command: uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+  crewai:
+    build:
+      context: ./crewai
+      dockerfile: Dockerfile
+    volumes:
+      - ./crewai:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev
+
+  scheduler:
+    build:
+      context: ./scheduler
+      dockerfile: Dockerfile
+    volumes:
+      - ./scheduler:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev
+
+  worker-data-collector:
+    build:
+      context: ./workers/data_collector
+      dockerfile: Dockerfile
+    volumes:
+      - ./workers/data_collector:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev
+
+  worker-telegram-notifier:
+    build:
+      context: ./workers/telegram_notifier
+      dockerfile: Dockerfile
+    volumes:
+      - ./workers/telegram_notifier:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev
+
+  worker-telegram-listener:
+    build:
+      context: ./workers/telegram_listener
+      dockerfile: Dockerfile
+    volumes:
+      - ./workers/telegram_listener:/app
+      - ./shared/schemas:/app/schemas:ro
+    environment:
+      - VIBE_ENV=dev

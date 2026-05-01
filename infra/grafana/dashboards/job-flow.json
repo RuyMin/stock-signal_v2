@@ -1,0 +1,161 @@
+{
+  "uid": "stock-signal-job-flow",
+  "title": "Stock-Signal — Job 흐름 추적",
+  "tags": ["stock-signal", "job_id", "vibe-framework"],
+  "timezone": "Asia/Seoul",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "job_id",
+        "type": "textbox",
+        "label": "job_id",
+        "description": "추적할 Correlation job_id (UUID)",
+        "current": { "value": "", "text": "" }
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "label": "service",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({job=\"vibe-framework\"}, service)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "value": "$__all", "text": "All" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "🔍 전체 흐름 (job_id 기준)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 14 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Ascending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"vibe-framework\", service=~\"$service\"} |= \"$job_id\"",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "❌ ERROR 건수 (1시간)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 0, "y": 14, "w": 6, "h": 4 },
+      "options": {
+        "graphMode": "none",
+        "colorMode": "background",
+        "reduceOptions": { "values": false, "calcs": ["last"], "fields": "" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"vibe-framework\", level=\"error\"}[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "⚠️ WARNING 건수 (1시간)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 6, "y": 14, "w": 6, "h": 4 },
+      "options": {
+        "graphMode": "none",
+        "colorMode": "background",
+        "reduceOptions": { "values": false, "calcs": ["last"], "fields": "" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"vibe-framework\", level=\"warning\"}[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "📊 서비스별 로그 발생량 (분당)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (service) (rate({job=\"vibe-framework\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "🚨 최근 ERROR 로그",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 10 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"vibe-framework\", level=\"error\"}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "📋 최근 모든 로그 (필터: $service)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 10 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": false,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"vibe-framework\", service=~\"$service\"}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

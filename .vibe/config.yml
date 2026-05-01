@@ -1,0 +1,40 @@
+# .vibe/config.yml
+# Vibe Framework 프로젝트 설정 파일
+# 이 파일은 Git에 커밋한다.
+# vault.path는 로컬 환경마다 다를 수 있으므로 팀 공유 시 주석 처리.
+
+environment:
+  os: windows                              # windows | macos | linux
+  shell: wsl2                              # wsl2 | bash | zsh (windows는 wsl2 권장)
+  project_root: /mnt/f/myProjects/stock-signal   # 소스 코드 루트 경로
+  # Windows 네이티브 경로 참고: F:\projects\reels-generator
+  # WSL2에서는 /mnt/f/... 형태로 접근
+
+project:
+  name: stock-signal               # 프로젝트 식별자 (영문, kebab-case)
+  description: "국내주식 AI 종목 추천"
+
+vault:
+  path: /mnt/d/My/GoogleDrive/Obsidian/CodeDream            # Obsidian Vault 경로
+  # Windows 네이티브: D:\Obsidian\MyVault
+  # macOS 예시: /Users/username/Obsidian/MyVault
+  # Linux 예시: /home/username/Obsidian/MyVault
+  project_folder: 04_Projects/stock-signal        # Vault 내 이 프로젝트 폴더 상대 경로
+  shared_folders:                           # 공통 참고 폴더 (선택사항)
+    # - 공통/기술스펙
+    # - 공통/팀컨벤션
+
+stack:
+  confirmed:
+    mobile: flutter
+    backend: fastapi
+    ai: crewai
+    db: postgresql
+    cache: redis
+    queue: kafka
+    storage: minio
+    realtime: supabase
+    logging: loki+grafana
+  pending:
+    # 미확정 스택은 여기에 항목명만 기재
+    # - web_framework

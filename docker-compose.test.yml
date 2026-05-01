@@ -1,0 +1,213 @@
+# 테스트 실행 오버라이드
+# 사용:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.test.yml \
+#     --env-file .env.dev run --rm <서비스>-tests
+#
+# 각 서비스 컨테이너 안에서 자기 모듈의 단위 테스트를 격리 실행.
+# (호스트 한 번 실행 시 워커별 동일 이름 'core/' 패키지 sys.modules 충돌 회피)
+#
+# 결과 전파: pytest exit code → docker run exit code
+
+services:
+
+  backend-tests:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: stock-signal-backend:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - BACKEND_LOG_LEVEL=WARNING
+      - CORS_ORIGINS=*
+      - PYTHONPATH=/app:/app/schemas:/repo
+    volumes:
+      - ./backend:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    networks:
+      - vibe-net
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio asgi-lifespan respx freezegun \
+        && python -m pytest tests/unit/backend -v --tb=short --strict-markers
+
+  data-collector-tests:
+    build:
+      context: ./workers/data_collector
+      dockerfile: Dockerfile
+    image: stock-signal-data-collector:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KIS_APP_KEY=test
+      - KIS_APP_SECRET=test
+      - PYTHONPATH=/app:/app/schemas:/repo
+    volumes:
+      - ./workers/data_collector:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    networks:
+      - vibe-net
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio respx freezegun \
+        && python -m pytest tests/unit/workers/test_data_collector.py tests/unit/workers/test_data_collector_main.py tests/unit/workers/test_kis_api.py tests/unit/workers/test_naver_scraper.py -v --tb=short --strict-markers
+
+  telegram-notifier-tests:
+    build:
+      context: ./workers/telegram_notifier
+      dockerfile: Dockerfile
+    image: stock-signal-telegram-notifier:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - TELEGRAM_BOT_TOKEN=test
+      - TELEGRAM_AUTHORIZED_CHAT_ID=12345
+      - PYTHONPATH=/app:/app/schemas:/repo
+    volumes:
+      - ./workers/telegram_notifier:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    networks:
+      - vibe-net
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio asyncpg respx freezegun \
+        && python -m pytest tests/unit/workers/test_telegram_notifier.py -v --tb=short --strict-markers
+
+  telegram-listener-tests:
+    build:
+      context: ./workers/telegram_listener
+      dockerfile: Dockerfile
+    image: stock-signal-telegram-listener:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - TELEGRAM_BOT_TOKEN=test
+      - TELEGRAM_AUTHORIZED_CHAT_ID=12345
+      - BACKEND_URL=http://backend:8000
+      - PYTHONPATH=/app:/app/schemas:/repo
+    volumes:
+      - ./workers/telegram_listener:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    networks:
+      - vibe-net
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio asyncpg respx freezegun \
+        && python -m pytest tests/unit/workers/test_telegram_listener.py -v --tb=short --strict-markers
+
+  scheduler-tests:
+    build:
+      context: ./scheduler
+      dockerfile: Dockerfile
+    image: stock-signal-scheduler:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - PYTHONPATH=/app:/app/schemas:/repo
+    networks:
+      - vibe-net
+    volumes:
+      - ./scheduler:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio asyncpg freezegun \
+        && python -m pytest tests/unit/workers/test_scheduler_holiday.py -v --tb=short --strict-markers
+
+  crewai-tests:
+    build:
+      context: ./crewai
+      dockerfile: Dockerfile
+    image: stock-signal-crewai:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - VIBE_ENV=dev
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-stock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-codedream}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-stock}:${POSTGRES_PASSWORD:-codedream}@postgres:5432/stock_signal_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - OPENAI_API_KEY=test-key
+      - OPENAI_MODEL_NAME=gpt-4o-mini
+      - PYTHONPATH=/app:/app/schemas:/repo
+    volumes:
+      - ./crewai:/app
+      - ./shared/schemas:/app/schemas:ro
+      - ./tests:/repo/tests:ro
+      - ./infra/postgres/init.sql:/repo/infra/postgres/init.sql:ro
+    networks:
+      - vibe-net
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        pip install -q --no-cache-dir pytest pytest-asyncio asyncpg respx freezegun \
+        && python -m pytest tests/unit/crewai -v --tb=short --strict-markers
+
+networks:
+  vibe-net:
+    name: stock-signal_vibe-net
+    external: true
