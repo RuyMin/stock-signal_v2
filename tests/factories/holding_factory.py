@@ -1,4 +1,5 @@
 """테스트용 holdings 데이터 생성 (multi-user 대응)."""
+from decimal import Decimal
 from typing import Optional
 
 
@@ -8,6 +9,7 @@ class HoldingFactory:
         pool,
         ticker: str = "005930",
         name: Optional[str] = None,
+        avg_price: Optional[Decimal] = None,
         user_id: Optional[str] = None,
         chat_id: int = 11111111,
     ) -> dict:
@@ -29,9 +31,9 @@ class HoldingFactory:
                     )
                 user_id = row["id"]
             row = await conn.fetchrow(
-                "INSERT INTO holdings (user_id, ticker, name) "
-                "VALUES ($1::uuid, $2, $3) "
-                "RETURNING id, ticker, name, added_at, user_id::text",
-                user_id, ticker, name,
+                "INSERT INTO holdings (user_id, ticker, name, avg_price) "
+                "VALUES ($1::uuid, $2, $3, $4) "
+                "RETURNING id, ticker, name, avg_price, added_at, user_id::text",
+                user_id, ticker, name, avg_price,
             )
         return dict(row)

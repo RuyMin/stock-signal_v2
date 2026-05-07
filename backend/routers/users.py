@@ -14,7 +14,7 @@ API:
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,12 +37,17 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
     payload: UserRegisterRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> UserResponse:
-    """텔레그램 /start 진입점. status=pending으로 INSERT (이미 있으면 그대로 반환)."""
+    """텔레그램 /start 진입점. status=pending으로 INSERT (이미 있으면 그대로 반환).
+
+    응답 코드: 신규 생성 시 201, 이미 존재 시 200 (listener가 admin 알림 트리거 판단에 사용).
+    """
     existing = await db.execute(select(User).where(User.chat_id == payload.chat_id))
     user = existing.scalar_one_or_none()
     if user is not None:
+        response.status_code = status.HTTP_200_OK
         return UserResponse.model_validate(user)
 
     user = User(

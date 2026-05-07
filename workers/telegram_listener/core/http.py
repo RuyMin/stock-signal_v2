@@ -58,11 +58,48 @@ class BackendClient:
     # ─── holdings (사용자별, chat_id 필수) ─────────────────────
 
     async def add_holding(
-        self, ticker: str, chat_id: int
+        self,
+        ticker: str,
+        chat_id: int,
+        name: Optional[str] = None,
+        avg_price: Optional[str] = None,
     ) -> tuple[int, dict[str, Any]]:
+        body: dict[str, Any] = {"ticker": ticker, "chat_id": chat_id}
+        if name is not None:
+            body["name"] = name
+        if avg_price is not None:
+            body["avg_price"] = avg_price
         resp = await self._client.post(
             "/holdings",
-            json={"ticker": ticker, "chat_id": chat_id},
+            json=body,
+            headers=self._headers(),
+        )
+        return resp.status_code, _safe_json(resp)
+
+    async def update_holding(
+        self,
+        ticker: str,
+        chat_id: int,
+        name: Optional[str] = None,
+        avg_price: Optional[str] = None,
+        clear_avg_price: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        """PATCH /holdings/{ticker} — name 또는 avg_price 갱신.
+
+        clear_avg_price=True면 avg_price=null을 명시 송신하여 평단가를 제거.
+        avg_price/name이 None이면 body에서 생략 (변경 없음).
+        """
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if clear_avg_price:
+            body["avg_price"] = None
+        elif avg_price is not None:
+            body["avg_price"] = avg_price
+        resp = await self._client.patch(
+            f"/holdings/{ticker}",
+            params={"chat_id": chat_id},
+            json=body,
             headers=self._headers(),
         )
         return resp.status_code, _safe_json(resp)
@@ -100,6 +137,23 @@ class BackendClient:
     ) -> tuple[int, dict[str, Any]]:
         resp = await self._client.get(
             "/recommendations", params={"date": date_str}, headers=self._headers()
+        )
+        return resp.status_code, _safe_json(resp)
+
+    async def get_recommendation_by_ticker(
+        self, ticker: str, chat_id: Optional[int] = None
+    ) -> tuple[int, dict[str, Any]]:
+        """해당 종목의 자세한 판단 근거 1건. 없으면 404.
+
+        chat_id 전달 시 보유 정보(평단가)도 응답에 포함.
+        """
+        params: dict[str, Any] = {}
+        if chat_id is not None:
+            params["chat_id"] = chat_id
+        resp = await self._client.get(
+            f"/recommendations/by-ticker/{ticker}",
+            params=params,
+            headers=self._headers(),
         )
         return resp.status_code, _safe_json(resp)
 

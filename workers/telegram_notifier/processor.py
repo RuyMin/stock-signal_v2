@@ -13,6 +13,7 @@
    - 텔레그램 송신, 사용자별 try/except로 격리
 5. 결과 메타데이터 반환 (sent_count, failed_count)
 """
+from dataclasses import replace
 from datetime import date
 from typing import Iterable
 
@@ -131,10 +132,13 @@ async def notify(
 
 
 def _filter_for_user(items: Iterable[RecItem], user_tickers: set[str]) -> list[RecItem]:
-    """exit_alert는 사용자 보유 종목만 포함. buy_hedge/watch는 그대로."""
+    """exit_alert는 사용자 보유 종목만 포함. buy_hedge/watch는 그대로.
+
+    각 RecItem에 사용자별 is_holding 마크를 채워 새 인스턴스로 반환 (formatter가 ⭐ 표시).
+    """
     result: list[RecItem] = []
     for it in items:
         if it.recommendation_type == "exit_alert" and it.ticker not in user_tickers:
             continue
-        result.append(it)
+        result.append(replace(it, is_holding=it.ticker in user_tickers))
     return result

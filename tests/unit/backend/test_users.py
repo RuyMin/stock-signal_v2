@@ -24,10 +24,10 @@ class TestRegister:
 
     @pytest.mark.asyncio
     async def test_register_existing_user_idempotent(self, api_client, db_pool):
-        """이미 등록된 chat_id → 기존 user 그대로 반환 (충돌 아님)."""
+        """이미 등록된 chat_id → 기존 user 그대로 반환 (200, 신규 생성 201과 구분)."""
         await UserFactory.create(db_pool, chat_id=11111111, status="active")
         resp = await api_client.post("/users/register", json={"chat_id": 11111111})
-        assert resp.status_code == 201
+        assert resp.status_code == 200
         body = resp.json()
         assert body["chat_id"] == 11111111
         assert body["status"] == "active"  # 기존 active 그대로

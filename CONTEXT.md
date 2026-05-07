@@ -2,7 +2,7 @@
 
 > 이 파일은 Claude의 프로젝트 기억 장치다.
 > 모든 작업 시작 전 반드시 읽고, 작업 완료 후 반드시 업데이트한다.
-> 마지막 업데이트: 2026-05-01 (scheduler 2-cron 분리: intraday 16:30 KST + premarket 06:30 KST. data-collector mode 분기 + 신규 stock.signals.completed 토픽. 단위 129/129 통과)
+> 마지막 업데이트: 2026-05-07 (KIS OAuth 토큰 공유 파일 캐시 — backend/crewai/data-collector가 docker named volume(`kis-token-cache`)으로 token.json 공유. 컨테이너 재시작/멀티 컨테이너 1분 재발급 차단 회피. data-collector 34→37.)
 
 ---
 
@@ -49,8 +49,10 @@
 - [x] 기본 앱 구조 (`backend/main.py`, `backend/Dockerfile`, `entrypoint.sh`)
 - [x] PostgreSQL 연결 (`backend/core/database.py`, `pool_size=10`)
 - [x] Alembic 환경 (`alembic.ini`, `migrations/env.py`) — `versions/20260430_0001_add_users_and_holdings_user_id.py` (multi-user 전환)
-- [x] 라우터: `health`, `users`, `holdings`, `recommendations`, `jobs` (총 11개 엔드포인트 — `users` 4개 신규)
+- [x] 라우터: `health`, `users`, `holdings`, `recommendations`, `jobs` (총 12개 엔드포인트 — `users` 4개, `PATCH /holdings/{ticker}` 1개 신규)
 - [x] **multi-user 전환** (2026-04-30): users 테이블 + holdings.user_id FK. holdings 모든 작업이 chat_id로 active user 식별. /users/register, /users/{chat_id}/approve, /users/by-chat-id/{chat_id}, GET /users.
+- [x] **/users/register 응답 코드 분리** (2026-05-03): 신규 생성 시 201, 이미 존재 시 200. listener가 admin 알림 트리거 판단에 사용.
+- [x] **holdings.avg_price + PATCH 엔드포인트** (2026-05-03): NUMERIC(12,2) nullable 컬럼 추가. POST /holdings에 avg_price 옵션 인자, 신규 PATCH /holdings/{ticker}로 평단가 갱신/제거 (avg_price=null 명시 송신 시 clear). Alembic `20260503_0001_add_holdings_avg_price`.
 - [x] 미들웨어: `add_response_headers` (X-Request-ID 에코, X-Response-Time)
 - [x] 예외 핸들러: `VibeException`/`RequestValidationError`/`IntegrityError`/`HTTPException` → `ErrorResponse` 표준
 - [x] structlog setup (`setup_logging("backend")`)
@@ -80,11 +82,14 @@
 - [x] `worker-telegram-notifier` — Kafka consumer (stock.recommendation.completed) → PG 조회 → fan-out 송신
   - [x] formatter.py — PRD §13 알림 형식 + 추천 0개 시 "조건 충족 종목 없음"
   - [x] **multi-user fan-out** (2026-04-30): active users 전체 루프 + 사용자별 holdings 매칭. exit_alert는 사용자 보유 종목만 메시지에 포함, 한 사용자 송신 실패는 try/except로 격리해 다른 사용자에 영향 없음.
-- [x] `worker-telegram-listener` — long-polling, 7개 명령어 (`/start /help /add /remove /list /recent /approve`)
+- [x] `worker-telegram-listener` — long-polling, 9개 명령어 (`/start /help /add /edit /remove /list /recent /reason /approve`)
   - [x] **multi-user 인증** (2026-04-30): backend `/users/by-chat-id`로 active 사용자만 명령어 처리. /start는 누구나 가능(register pending), /approve는 admin 전용. `TELEGRAM_AUTHORIZED_CHAT_ID` 단일값 의존 제거.
+  - [x] **신규 등록 admin 알림** (2026-05-03): `/start` 응답이 201(신규) + status=pending이면 backend `/users` 조회로 active admin들에게 텔레그램 fan-out 알림. 메시지에 chat_id/username/`/approve` 명령 포함. 송신 실패는 try/except로 격리. ADMIN_BOOTSTRAP_IDS 본인은 자기 등록 시 알림 제외.
+  - [x] **/add 평단가 옵션 + /edit 신규 명령** (2026-05-03): `/add 005930 [평단가]` 두 번째 인자 옵션, `/edit 005930 75000` 평단가 갱신, `/edit 005930 -` 평단가 제거. /list 출력에 평단가 표시. clear는 BackendClient.update_holding(clear_avg_price=True)로 avg_price=null 명시 송신.
+  - [x] **종목명 수동 입력 지원** (2026-05-03): `/add 005930 코리안리`(2nd 비숫자 → name), `/add 005930 코리안리 75000`(3-arg = name+price), `/edit 005930 코리안리`(비숫자 → name 갱신). worker-data-collector는 `name IS NULL`인 row만 KIS API로 채우므로 사용자 수동 입력값은 보존.
 
 ### Scheduler
-- [x] `scheduler/main.py` — APScheduler CronTrigger 2-cron (2026-05-01 분리)
+- [x] `scheduler/main.py` — APScheduler CronTrigger 2-cron (2026-05-01 분리, 2026-05-06 휴장일 갭 메타 추가)
   - **intraday (KST 16:30)**: `mode='intraday'`, signals 수집만 트리거
   - **premarket (KST 06:30)**: `mode='premarket'`, macro+뉴스+추천 트리거. `target_date`는 직전 거래일(signals 조회 기준), `target_trading_date`는 오늘(장 시작 예정일)
   - 두 시각 모두 `SCHEDULE_INTRADAY_HOUR/MINUTE` / `SCHEDULE_PREMARKET_HOUR/MINUTE` env로 오버라이드 가능
@@ -130,7 +135,7 @@ worker-data-collector / worker-telegram-notifier / worker-telegram-listener   # 
 
 | 토픽 | 발행자 | 구독자 | 페이로드 |
 |------|-------|-------|---------|
-| stock.data.requested | scheduler | worker-data-collector | `DataCollectionRequested` (mode='intraday'\|'premarket') |
+| stock.data.requested | scheduler | worker-data-collector | `DataCollectionRequested` (mode='intraday'\|'premarket'). premarket은 추가로 `holiday_gap_days`(int) + `holidays_in_gap`(list[{date, reason}]) 포함 |
 | stock.signals.completed | worker-data-collector | (모니터링) | intraday 완료 — signals만 수집 |
 | stock.data.completed | worker-data-collector | crewai | premarket 완료 — macro+뉴스 수집 |
 | stock.data.failed | worker-data-collector | DLQ handler | `DataCollectionFailed` |
@@ -148,11 +153,13 @@ worker-data-collector / worker-telegram-notifier / worker-telegram-listener   # 
 | Method | Path | 상태 | 응답 모델 | 설명 |
 |--------|------|------|---------|------|
 | GET | /health | ⬜ | dict | 헬스체크 |
-| POST | /holdings | ⬜ | `HoldingResponse` | 보유 종목 추가 |
+| POST | /holdings | ⬜ | `HoldingResponse` | 보유 종목 추가 (avg_price 옵션) |
 | GET | /holdings | ⬜ | `HoldingListResponse` | 보유 종목 목록 |
+| PATCH | /holdings/{ticker} | ⬜ | `HoldingResponse` | 평단가 갱신/제거 |
 | DELETE | /holdings/{ticker} | ⬜ | 204 | 보유 종목 제거 |
 | GET | /recommendations | ⬜ | `RecommendationListResponse` | 특정 날짜 추천 (`?date=YYYY-MM-DD`) |
 | GET | /recommendations/recent | ⬜ | `RecommendationListResponse` | 최근 N일 (`?limit=10`) |
+| GET | /recommendations/by-ticker/{ticker} | ⬜ | `RecommendationItem` | 해당 종목 최근 1건 (`/reason` 백엔드) |
 | GET | /jobs/{job_id} | ⬜ | `JobStatusResponse` | Job 상태 |
 
 ---
@@ -194,7 +201,7 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 ### Worker / CrewAI → PostgreSQL
 
 - `users` (chat_id, status, is_admin) — 텔레그램 봇 multi-user 화이트리스트 (2026-04-30 추가)
-- `holdings` (user_id FK, ticker, name) — 사용자별 보유 종목 (UNIQUE(user_id, ticker))
+- `holdings` (user_id FK, ticker, name, avg_price) — 사용자별 보유 종목 (UNIQUE(user_id, ticker)). avg_price는 NUMERIC(12,2) nullable.
 - `signals` (date, ticker, agency_*, foreign_*, consecutive_buy_days) — 시장 공통
 - `news` (date, ticker, title, url) — 시장 공통
 - `macro_indicators` (date, us10y, dxy, wti, sp500, gold) — 시장 공통
@@ -221,6 +228,7 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 | INVALID_REQUEST | 400 | 필드 형식 오류 (ticker 형식 등) |
 | MISSING_FIELD | 400 | 필수 필드 누락 |
 | HOLDING_NOT_FOUND | 404 | 🆕 DELETE /holdings/{ticker} 미존재 |
+| RECOMMENDATION_NOT_FOUND | 404 | 🆕 GET /recommendations/by-ticker/{ticker} 미존재 |
 | JOB_NOT_FOUND | 404 | GET /jobs/{job_id} 미존재 |
 | INTERNAL_ERROR | 500 | 서버 내부 오류 |
 | SERVICE_UNAVAILABLE | 503 | 의존 서비스 (Kafka, PG, 한투 API) 불가 |
@@ -267,6 +275,10 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 | worker-telegram-listener | command_received | INFO | 사용자 명령어 수신 |
 | worker-telegram-listener | command_unauthorized | WARNING | 인가되지 않은 chat_id |
 | worker-telegram-listener | command_processed | INFO | 처리 완료 |
+| worker-telegram-listener | admin_notified_new_registration | INFO | 신규 사용자 등록 알림을 admin에게 송신 완료 |
+| worker-telegram-listener | admin_notify_failed | ERROR | admin 알림 송신 실패 (개별 admin 한정, 다른 admin은 계속) |
+| worker-telegram-listener | admin_notify_skipped_no_active_admin | WARNING | active admin이 없어 알림 스킵 |
+| worker-telegram-listener | admin_notify_skipped_list_failed | WARNING | backend `/users` 조회 실패로 알림 스킵 |
 | backend | request_received | DEBUG | HTTP 요청 |
 | backend | holding_added / _removed | INFO | 보유 종목 변경 |
 | backend | request_error | ERROR | 검증 실패 |
@@ -321,7 +333,12 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 9. **GitHub Secrets 등록 필요 (배포 시점)**: `OCI_HOST`, `OCI_USER`, `OCI_SSH_KEY`. 단일 VM에 staging/prod를 디렉토리 분리(`/opt/vibe-staging/`, `/opt/vibe-prod/`)로 운영 가정.
 10. **deploy.yml의 `deploy-staging` 단계는 Repository Variable `STAGING_ENABLED=true` 시에만 실행**. 단일 VM 운영 시 prod만 굴리려면 이 변수를 설정하지 않으면 됨.
 11. **첫 배포 전 OCI VM 초기 셋업 필요**: Docker 설치, `/opt/vibe-prod/` 디렉토리 생성, `git clone`, `.env.prod` 배치, `docker login ghcr.io` 1회. 상세는 `skills/infra/DEPLOY_SKILL.md` "VM 초기 설정" 참조.
-12. **`holdings.name`은 nullable**: backend POST /holdings는 ticker만 받아 name=null로 저장. worker-data-collector가 첫 데이터 수집 시 KIS API의 종목 마스터로 name UPDATE. 사용자 알림 시점에는 name 노출.
+12. **`holdings.name`은 nullable + 다층 채움 정책 (2026-05-07 갱신)**: backend POST /holdings는 ticker 필수, name/avg_price는 옵션. 채움 우선순위:
+    1. payload.name 명시 (사용자 직접 입력) → 그대로 사용
+    2. payload.name 미지정 → **backend가 KIS API `fetch_ticker_name` 즉시 호출** (`backend/clients/kis_api.py`)
+    3. KIS 호출 실패(키 미설정/네트워크/rt_cd 오류) → name=NULL, worker-data-collector가 다음 사이클에 `name IS NULL` row 보강
+    
+    이 다층 구조로 사용자는 `/add 005930` 직후 즉시 "✅ 추가됨: 삼성전자(005930)" 응답 받음 (worker 사이클 대기 불필요). worker 보강은 안전망. KIS_APP_KEY 미설정 환경(테스트 등)에서는 자동 fallback. 사용자가 `/edit 005930 코리안리`로 직접 입력한 name은 worker가 덮어쓰지 않음(name IS NULL 조건 유지).
 13. **Backend는 Kafka 미발행**: 현 시점 backend의 모든 엔드포인트는 동기 PG 작업으로 끝나는 단순 CRUD/READ. 향후 비동기 트리거 추가 시 `core/kafka.py` 신설 + Producer 도입.
 14. **TEST_SPEC API-002 (한투 API 자동 조회) 구현 위치 변경**: backend가 아닌 worker-data-collector에서 처리. QA Engineer는 본 변경을 반영해 worker 단위 테스트로 분류.
 15. ~~**KIS API 호출 골격은 stub**~~ → **운영 검증 완료 (2026-04-30)**: `fetch_signals`는 외국인기관 매매가집계(`FHPTJ04400000`), `fetch_ticker_name`은 주식기본조회(`CTPF1002R`). 가집계 API 특성상 분리된 buy/sell 값은 없고 net만 채워짐(`signals.{agency,foreign}_{buy,sell}`는 NULL). TR_ID/시장범위는 환경변수로 오버라이드 가능. ⚠️ KIS는 **1분 내 동일 키 토큰 재발급 차단** 정책 — 컨테이너 재시작 직후 1분 이내 호출 시 403. 운영에서 토큰은 24h 유효하므로 컨테이너 살아있는 동안은 문제 없음. 잦은 재시작 환경이면 토큰 외부 캐시(Redis 등) 도입 검토.
@@ -346,12 +363,32 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 34. **단위 테스트 미커버 영역 — Agent build/Crew kickoff 전체 흐름**: 본 프로젝트 crewai 단위 테스트는 `on_complete`(JSON 파싱 + DB INSERT) / `Tool._run()`(DB 조회) 직접 호출만 검증. 실제 `setup_agents()` → `Agent.__init__` → LLM 호출 흐름은 비용/시간 문제로 단위 테스트에서 제외. 따라서 Agent 빌드 단계의 호환성 버그(args_schema V1/V2 등)는 **반드시 운영 환경 수동 트리거로 검증**할 것. 의존성 업그레이드 시 단위 테스트 통과만으로 안전하다고 판단 금지.
 35. **Vibe-net Docker 네트워크 명시 필요**: `docker-compose.test.yml` 같은 추가 override 파일에서 새 서비스 정의 시 `networks: [vibe-net]` 명시 + 파일 끝 `networks.vibe-net.external: true` 또는 `name: stock-signal_vibe-net` 매핑 필요. 안 하면 default 네트워크에 붙어서 `postgres`/`kafka` 호스트 resolve 실패.
 36. **컨테이너별 이미지 태그 동기화 주의**: `docker-compose.dev.yml`은 `stock-signal-crewai:latest`(태그 미지정), `docker-compose.test.yml`은 `stock-signal-crewai:dev` 사용. requirements 갱신 시 둘 다 빌드 필요 (`docker compose build crewai` + `docker compose -f ... -f test.yml build crewai-tests`). 한 쪽만 빌드하면 회귀 검증 결과가 운영과 다를 수 있음.
-37. **KIS OAuth 토큰 1분 내 재발급 차단**: 컨테이너 재시작 직후 1분 이내 재호출 시 403. 운영에서는 24h 유효한 토큰을 메모리 캐시로 재사용해서 문제 없음. smoke test 등 짧은 시간 내 두 번 호출 시 주의.
+37. **KIS OAuth 토큰 1분 내 재발급 차단 + 공유 파일 캐시 (2026-05-07 보강)**: 운영 중 24h 토큰을 메모리 캐시했지만 컨테이너 재시작/멀티 컨테이너 환경에서는 각자 새로 발급 시도해 1분 정책 충돌 → 403. **fix**: backend/crewai/worker-data-collector가 `kis-token-cache` named volume의 `/var/cache/kis/token.json`을 공유. `_ensure_token()` 흐름: 메모리 → 파일 → KIS 발급 → 파일 저장. 발급 실패(403) 시 파일 재조회 (다른 컨테이너가 막 발급했을 가능성). atomic write(tmp + rename)로 동시 쓰기 안전.
 38. **Alembic stamp 운영 패턴 (2026-04-30)**: `entrypoint.sh`가 `alembic current` 빈 출력 시 `stamp head` 분기 처리하지만, dev 환경에서 직접 ALTER로 schema 변경한 경우 실제로 stamp가 안 되어 `upgrade head`가 다시 CREATE TABLE 시도하다 DuplicateTableError. 우회: `INSERT INTO alembic_version (version_num) VALUES ('<head_revision>')` 직접 실행. 운영(prod)에서는 첫 부팅 시 init.sql + stamp head 자동 처리되므로 문제 없음.
 39. **Multi-user 화이트리스트 운영 정책 (2026-04-30)**: users 테이블 + chat_id 기반 인증. `/start`는 누구나 가능(pending 등록), 다른 명령어는 active만 처리. 첫 admin은 `STOCK_SIGNAL_BOOTSTRAP_ADMIN_CHAT_ID` 환경변수 또는 마이그레이션 시드. 운영 시작 전 admin chat_id 1개 미리 active+is_admin 처리 필요. 신규 사용자는 admin이 텔레그램 `/approve <chat_id>` 명령으로 승인.
 40. **추천 데이터 시맨틱 (2026-04-30)**: signals/news/macro/recommendations/jobs는 모두 시장 공통 (user 분리 없음). exit_alert 메시지 분기만 사용자별 — notifier가 사용자 holdings와 매칭하여 보유 종목인 경우만 메시지에 포함. crewai는 모든 사용자 holdings 합집합을 후보 풀로 사용하므로 multi-user 환경에서도 LLM 호출은 1회/일.
 41. **종목명 fallback 정책 (2026-05-01)**: notifier가 메시지 포맷 시 `recommendations.name`이 NULL이면 `holdings`에 등록된 동일 ticker의 name으로 보강. 우선순위: `recommendations.name` > `holdings.name`(distinct on ticker) > `ticker만 표시`. LLM 응답이 종목명을 누락해도 메시지가 읽기 좋게 유지됨. multi-user 환경에서 같은 ticker가 여러 사용자에 등록되어 있어도 어느 한 사용자의 name을 사용 (DISTINCT ON ORDER BY added_at DESC).
 42. **2-cron 트리거 분리 (2026-05-01)**: scheduler 단일 KST 15:35 cron → 2-cron(`intraday` 16:30 + `premarket` 06:30 D+1)으로 분리. 사유: 미국 시장 마감(KST 05:00 서머타임)과 정리된 미국 매크로/뉴스 가져올 시간 확보. `stock.data.requested` 페이로드에 `mode`(`intraday`\|`premarket`) + `target_trading_date` 추가. data-collector main.py가 mode별 분기 처리 → intraday는 `stock.signals.completed`(CrewAI 안 받음), premarket은 기존 `stock.data.completed`(CrewAI 추천 트리거). signals 조회는 premarket의 `signal_date`(직전 한국 거래일) 기준, 뉴스 `news.date`는 `target_trading_date`로 저장.
+
+44. **휴장일 갭 인식 (2026-05-06)**: scheduler `holidays_between(signal_date, target_trading_date)`로 두 거래일 사이 휴장일 메타 계산 → premarket payload에 `holiday_gap_days`(int) + `holidays_in_gap`(list[{date, reason}])로 동봉. data-collector가 stock.data.completed로 forwarding, crewai/main.py가 사람-친화 텍스트(`holiday_gap_text`)로 변환해 kickoff inputs에 주입 → SynthesisTask + NewsAnalysisTask description이 `{holiday_gap_text}`로 LLM에 전달. **NewsQueryTool은 단일 날짜 → date_from/date_to 범위 쿼리로 변경**. signal_date~target_trading_date 모든 뉴스(휴장일 갭 포함)를 한 번에 가져와 LLM이 시점 구분 가능. 추가 가이드: 직전 거래일에 부정 뉴스가 있었으나 그날 외+기관 강한 매수면 "흡수"로 해석 / 갭 동안 글로벌 호재는 다음 거래일 직접 반영. **사유**: 2026-05-06 삼성전자(005930) 케이스 — 5/4 부정 뉴스(씨티 목표주가 하향)만 LLM이 봤고 5/6 새벽 호재(반도체 랠리 등)는 못 봐서 잘못된 exit_alert 발생. `holidays.KR(language="ko")` 사용 (구 버전은 영어 fallback).
+
+45. **yfinance 라이브러리 버전 노후 → 매크로 0건 수집 (2026-05-06 해결)**: yfinance 0.2.40이 Yahoo Finance API 변경(JSON 응답 형식)을 따라가지 못해 모든 심볼에서 `Expecting value: line 1 column 1` 에러 → macro_indicators 0 row. httpx로 직접 호출하면 200 OK이므로 네트워크/지역 차단은 무관. **`yfinance==1.3.0`으로 업그레이드해 5지표 모두 정상 수집**. 단위 테스트는 mock이라 영향 없음. 운영 모니터링: 매일 `yfinance_snapshot_collected` 로그의 `filled` dict가 전부 true인지 확인. 만약 또 깨지면 네이버 금융(`finance.naver.com/marketindex/`)으로 fallback 검토 — 단일 경로 유지가 단순하므로 1주 이상 정상이면 그대로 둠.
+
+46. **CrewAI 데이터 흐름 3대 결함 fix (2026-05-06)**: 005930 exit_alert 잘못된 추천 검증 과정에서 발견.
+    - **(a) SignalAnalyzer가 보유 종목을 후보 풀에서 누락**: `signal_query(min_consecutive≥3)`만 호출해 신규 후보만 도출 → 005930(consecutive=2) 같은 보유 종목이 NewsAnalyst/Synthesizer에 도달 전 사라짐. **fix**: SignalAnalyzerAgent에 `HoldingsQueryTool` 추가, SignalAnalysisTask에 "후보 풀 = (signal_query 결과) ∪ (holdings_query 결과)" 명시.
+    - **(b) 보유 종목의 실제 수급 강도를 못 봄**: `min_consecutive≥3` 필터 때문에 보유 종목의 net_buy 데이터 자체가 안 잡힘 → LLM이 "consecutive < 3 = 약세"로 단정 → 모든 보유 종목 exit_alert. **fix**: `SignalQueryInput.tickers` Optional 필드 추가, Task에 "보유 종목별 `min_consecutive=0, tickers=[...]`로 한 번 더 호출해 net_buy 정량 평가" 가이드. 정량 가이드: net_buy 합 ≥ +30억 + consecutive ≥ 2 → '강한 매수 흡수형'.
+    - **(c) MacroAnalysisTask 기준일 오류**: `near_date={target_date}`(=직전 한국 거래일)로 호출 → 다음 거래일에 가장 신선한 미국 매크로(글로벌 캘린더, 한국 휴장 무관)를 못 잡고 LLM이 -1일씩 17번+ 무한 시도. **fix**: `near_date={target_trading_date}`로 변경 + "글로벌 매크로는 한국 휴장과 무관, 1회 호출 후 available=false면 즉시 unknown 반환, 재시도 금지" 명시.
+    - **검증**: 005930 동일 데이터로 3차 publish 결과 exit_alert=11 → **buy_hedge=75 (강한 매수 흡수형, 반도체 호재 인식)**. macro_query 호출도 17회+ → 1회로 정상화.
+
+47. **분류 룰 LLM 일탈 → on_complete() 후처리 강제 (2026-05-06)**: 5차 검증에서 LLM이 73점에 exit_alert, 32점에 watch로 분류 룰 위반(score≥70은 buy_hedge, 보유+score<50은 exit_alert여야). **fix**: `crew.py on_complete()`가 INSERT 직전 score + holdings 멤버십으로 type 강제 재분류 (score≥70→buy_hedge, 50≤score<70→watch, score<50 AND 보유→exit_alert, score<50 AND 신규→제외). LLM 출력 type과 차이 시 `type_reclassified` 로그로 모니터링. SynthesisTask description도 동일 룰 명시 + "보유 H 5개 모두 출력 / 신규 N score 상위 3개". 6차 검증에서 5종목 모두 룰 일치 ✅.
+
+48. **신규 후보 누락 — 운영 1주 모니터링 (2026-05-06)**: 5/6 검증 5차/6차에서 신규 매수 후보가 추천에 포함되지 않음. 5차는 SignalAnalyzer가 신규 후보 정확히 도출했지만 Synthesizer가 5종목 한도에서 누락, 6차는 SignalAnalyzer 자체가 JSON 깨고 영어 마크다운으로 응답해 new_candidates 정보 사라짐. **LLM 비결정성**으로 Task description 강제만으로는 한계. 임시 방침: **운영 1주 자연 누적 후 빈도 결정**. 자주 누락되면 후속 fix는 "후보 풀 결정을 코드로 deterministic하게 (crewai/main.py에서 holdings + signals 조회해 inputs에 명시 주입), LLM은 점수 산정만". 운영 모니터링: 매일 recommendations 테이블에서 보유 종목 외 ticker 비율 확인. 0% 지속이면 코드 fix 진행.
+
+51. **`/reason` 명령 + GET /recommendations/by-ticker/{ticker} (2026-05-07)**: 사용자가 특정 종목의 최근 판단을 자세히 받아볼 수 있도록 신규 텔레그램 명령 + backend Detail 응답 endpoint 추가. **응답 구성** (`RecommendationDetailResponse`): (a) 가장 최근 recommendation 1건, (b) signals 최근 7일치 raw, (c) news rec.date~target_trading_date 최신 5건, (d) macro target_trading_date 이전 가장 최근 1건, (e) holding(chat_id 옵션 query, active 사용자 보유 시), (f) **외+기관 추정 평단가** = `SUM(net_buy_i × close_i) / SUM(net_buy_i)` — signals 양수 매수일 + KIS `inquire-daily-itemchartprice` 종가 가중. `backend/clients/kis_api.py.fetch_daily_prices()` 신설(TR_ID `FHKST03010100`). 데이터 부족(시그널 0건, KIS 응답 빈값 등) 시 평단가는 None으로 자연 생략. listener `_format_reason_message()`가 6개 섹션(헤더/수급/뉴스/매크로/추천 추정 매집가/내 보유)을 데이터 가용성에 따라 자동 표시. 추정값 한계는 메시지에 "추정값" 명시. **부수 fix**: `RecommendationItem.job_id`가 SQLAlchemy `UUID(as_uuid=True)`라 단일 객체 응답 시 pydantic `string_type` 검증 오류 → schema에 `field_validator(mode="before")`로 `uuid.UUID → str` 강제 변환.
+
+50. **crewai on_complete()의 KIS name 보강 (2026-05-07)**: 5/7 알림에서 신규 후보 3개(018880/003530/006800)가 종목명 없이 ticker만 표시된 이슈. LLM(Synthesizer)이 JSON에 name을 NULL로 줘서 `recommendations.name=NULL` + notifier fallback이 holdings에만 의존(신규 후보는 holdings에 없음 → ticker 노출). **fix**: backend의 `clients/kis_api.py`와 같은 sync 패턴으로 `crewai/clients/kis_api.py` 신설 (httpx.Client + 모듈 단위 토큰 캐시). `crew.py on_complete()`가 INSERT 직전 LLM name 미명시 시 KIS 즉시 호출해 채움. 다층 폴백: LLM name > KIS API > NULL(notifier holdings 폴백 시도). crewai requirements는 httpx 명시 제거(crewai 1.14.3이 자동 0.28.x 설치, 0.27.0 핀과 충돌). 5/7 NULL 5건은 one-shot UPDATE로 즉시 보강(005930=삼성전자보통주, 003530=한화투자증권보통주, 006800=미래에셋증권보통주, 018880=한온시스템보통주, 000660=에스케이하이닉스보통주). 단위 테스트 +3 (KIS 채움 / LLM 우선 / 실패 NULL).
+
+49. **5/7 운영에서 신규 후보 정상 추천 확인 + 메시지 포맷 두 섹션 분리 (2026-05-07)**: 5/7 06:30 KST 자동 트리거 결과 005930/000660 보유 평가 + **018880/003530/006800 신규 후보 3개가 watch로 정상 추천**됨 (#48에서 우려한 누락 미발생). 그러나 사용자 입장에서 watch 섹션에 보유와 신규가 섞여 보유 표시가 모호. 1차 fix(⭐ 마크)를 거쳐 최종 fix는 **메시지 큰 그림을 보유/신규 두 섹션으로 분리**: `📌 내 보유 종목 평가 (N종목)` + `🔍 신규 추천 (M종목)`. 분류(buy_hedge/watch/exit_alert)는 종목 줄에 이모지(🟢/🟡/🔴) + 라벨로 표시. ⭐ 마크와 범례는 제거. exit_alert는 보유 한정이라 자연스럽게 보유 섹션에만 등장. multi-user: 동일 ticker라도 사용자 A 보유면 A 메시지의 보유 섹션, B 미보유면 B 메시지의 신규 섹션. processor.py `_filter_for_user`가 사용자별 is_holding 마크 채워 새 RecItem 인스턴스로 반환(dataclass replace).
 43. **postgres healthcheck dbname 명시 (2026-05-01)**: 기존 `pg_isready -U ${POSTGRES_USER}`는 dbname 미지정 → PG 기본 동작상 username과 같은 이름 DB(`stock`) 접속 시도 → 매 10초 `FATAL: database "stock" does not exist` 로그 오염. healthcheck 자체는 통과(exit 0)지만 진짜 에러가 묻힘. 수정: `pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}`. postgres 컨테이너 재생성 시 적용.
 
 ---
@@ -467,7 +504,7 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 
 ```bash
 # 개발 (로컬, 핫리로드)
-docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.dev up
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.dev up -d
 
 # 스테이징 (OCI VM, ghcr.io 이미지)
 docker compose -f docker-compose.yml -f docker-compose.staging.yml --env-file .env.staging up -d

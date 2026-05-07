@@ -1,8 +1,9 @@
 """holdings — 사용자별 보유 종목 (multi-user, 소규모 화이트리스트)."""
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import ForeignKey, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,4 +23,5 @@ class Holding(Base):
     )
     ticker: Mapped[str] = mapped_column(String(10), nullable=False)
     name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    avg_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     added_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)

@@ -49,9 +49,24 @@ async def run() -> None:
             structlog.contextvars.bind_contextvars(job_id=job_id)
             try:
                 logger.info("crew_received", topic=TOPIC_IN)
+                gap_days = int(event.get("holiday_gap_days") or 0)
+                holidays_in_gap = event.get("holidays_in_gap") or []
+                if gap_days <= 0 or not holidays_in_gap:
+                    holiday_gap_text = (
+                        "직전 거래일과 다음 거래일이 연속(휴장일 갭 없음)."
+                    )
+                else:
+                    items = ", ".join(
+                        f"{h['date']}({h['reason']})" for h in holidays_in_gap
+                    )
+                    holiday_gap_text = (
+                        f"직전 거래일 ↔ 다음 거래일 사이 {gap_days}일 휴장: {items}. "
+                        "이 기간 동안 발생한 글로벌 뉴스/매크로 변화는 다음 거래일에 큰 영향을 미칠 수 있다."
+                    )
                 inputs = {
                     "target_date": event["target_date"],
                     "target_trading_date": event["target_trading_date"],
+                    "holiday_gap_text": holiday_gap_text,
                 }
                 crew = StockRecommendationCrew(job_id=job_id)
                 # CrewAI는 동기 — 별도 스레드에서 실행

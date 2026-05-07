@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     ticker      VARCHAR(10) NOT NULL,
     name        VARCHAR(100),
+    avg_price   NUMERIC(12,2),
     added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(user_id, ticker)
 );

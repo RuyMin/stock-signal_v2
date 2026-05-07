@@ -24,10 +24,18 @@ from apscheduler.triggers.cron import CronTrigger
 KAFKA_BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC_OUT = "stock.data.requested"
 
-INTRADAY_HOUR = int(os.getenv("SCHEDULE_INTRADAY_HOUR", "16"))
-INTRADAY_MINUTE = int(os.getenv("SCHEDULE_INTRADAY_MINUTE", "30"))
-PREMARKET_HOUR = int(os.getenv("SCHEDULE_PREMARKET_HOUR", "6"))
-PREMARKET_MINUTE = int(os.getenv("SCHEDULE_PREMARKET_MINUTE", "30"))
+def _env_int(name: str, default: int) -> int:
+    """빈 문자열도 default로 폴백 (docker compose가 unset env를 ""로 전달하기 때문)."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
+INTRADAY_HOUR = _env_int("SCHEDULE_INTRADAY_HOUR", 16)
+INTRADAY_MINUTE = _env_int("SCHEDULE_INTRADAY_MINUTE", 30)
+PREMARKET_HOUR = _env_int("SCHEDULE_PREMARKET_HOUR", 6)
+PREMARKET_MINUTE = _env_int("SCHEDULE_PREMARKET_MINUTE", 30)
 
 TZ_KST = ZoneInfo("Asia/Seoul")
 SERVICE_NAME = "scheduler"
@@ -64,6 +72,32 @@ def previous_business_day(d: date) -> date:
     while not is_market_open(p):
         p -= timedelta(days=1)
     return p
+
+
+def holidays_between(start: date, end: date) -> list[dict]:
+    """start와 end 사이(둘 다 제외)의 휴장 일자 목록. start < end 가정.
+
+    각 원소: {"date": "YYYY-MM-DD", "reason": "주말 (토요일)" | "어린이날" 등}.
+    LLM 컨텍스트로 휴장일 갭 동안 글로벌 뉴스 변화를 인식하도록 함.
+    """
+    out: list[dict] = []
+    if end <= start:
+        return out
+    try:
+        kr_hols = holidays.KR(years=range(start.year, end.year + 1), language="ko")
+    except TypeError:
+        # 구 버전 holidays 라이브러리는 language 인자 미지원 — fallback
+        kr_hols = holidays.KR(years=range(start.year, end.year + 1))
+    cur = start + timedelta(days=1)
+    while cur < end:
+        if cur.weekday() == 5:
+            out.append({"date": cur.isoformat(), "reason": "주말 (토요일)"})
+        elif cur.weekday() == 6:
+            out.append({"date": cur.isoformat(), "reason": "주말 (일요일)"})
+        elif cur in kr_hols:
+            out.append({"date": cur.isoformat(), "reason": kr_hols.get(cur, "공휴일")})
+        cur += timedelta(days=1)
+    return out
 
 
 async def _publish(payload: dict) -> None:
@@ -123,12 +157,15 @@ async def trigger_premarket() -> None:
             )
             return
         signal_date = previous_business_day(today_kst)
+        holidays_in_gap = holidays_between(signal_date, today_kst)
         await _publish(
             {
                 "job_id": job_id,
                 "mode": "premarket",
                 "target_date": signal_date.isoformat(),
                 "target_trading_date": today_kst.isoformat(),
+                "holiday_gap_days": (today_kst - signal_date).days - 1,
+                "holidays_in_gap": holidays_in_gap,
                 "triggered_at": datetime.utcnow().isoformat(),
             }
         )

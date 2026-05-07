@@ -35,9 +35,11 @@ def main() -> None:
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help_cmd))
     application.add_handler(CommandHandler("add", handlers.add))
+    application.add_handler(CommandHandler("edit", handlers.edit))
     application.add_handler(CommandHandler("remove", handlers.remove))
     application.add_handler(CommandHandler("list", handlers.list_cmd))
     application.add_handler(CommandHandler("recent", handlers.recent))
+    application.add_handler(CommandHandler("reason", handlers.reason))
     application.add_handler(CommandHandler("approve", handlers.approve))
     # 등록되지 않은 명령어 → 알림
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown))

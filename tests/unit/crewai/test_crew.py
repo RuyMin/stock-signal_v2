@@ -228,6 +228,155 @@ class TestOnComplete:
         assert result["has_buy_hedge"] is False
 
 
+class TestOnCompleteEnforceClassification:
+    """on_complete() 분류 후처리 강제 — LLM 룰 일탈 방어."""
+
+    @pytest.mark.asyncio
+    async def test_low_score_new_candidate_excluded(self, db_pool, crew_with_db):
+        """신규 후보(보유 X) score<50 → INSERT 안 함."""
+        Crew = crew_with_db
+        # 005930은 보유 안 함 (HoldingFactory 미사용). LLM이 buy_hedge로 잘못 분류해도 제외.
+        items = [{"ticker": "999111", "recommendation_type": "buy_hedge", "score": 30}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        result = crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        assert result["recommendation_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_low_score_holding_forced_exit_alert(self, db_pool, crew_with_db):
+        """보유 종목 score<50 → LLM이 watch로 잘못 분류해도 exit_alert 강제."""
+        from tests.factories import HoldingFactory
+        await HoldingFactory.create(db_pool, ticker="005930")
+        Crew = crew_with_db
+        items = [{"ticker": "005930", "recommendation_type": "watch", "score": 32}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        result = crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        assert result["has_exit_alert"] is True
+        async with db_pool.acquire() as conn:
+            rec_type = await conn.fetchval(
+                "SELECT recommendation_type FROM recommendations WHERE ticker='005930'"
+            )
+        assert rec_type == "exit_alert"
+
+    @pytest.mark.asyncio
+    async def test_high_score_forced_buy_hedge(self, db_pool, crew_with_db):
+        """score≥70 → LLM이 exit_alert로 잘못 분류해도 buy_hedge 강제."""
+        from tests.factories import HoldingFactory
+        await HoldingFactory.create(db_pool, ticker="000660")
+        Crew = crew_with_db
+        # LLM이 73점에 exit_alert 분류 (5차 검증에서 실제 발생한 룰 위반)
+        items = [{"ticker": "000660", "recommendation_type": "exit_alert", "score": 73}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        result = crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        assert result["has_buy_hedge"] is True
+        async with db_pool.acquire() as conn:
+            rec_type = await conn.fetchval(
+                "SELECT recommendation_type FROM recommendations WHERE ticker='000660'"
+            )
+        assert rec_type == "buy_hedge"
+
+    @pytest.mark.asyncio
+    async def test_mid_score_forced_watch(self, db_pool, crew_with_db):
+        """50≤score<70 → 자동 watch (보유 무관)."""
+        Crew = crew_with_db
+        items = [{"ticker": "999222", "recommendation_type": "buy_hedge", "score": 55}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        result = crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        assert result["has_watch"] is True
+        async with db_pool.acquire() as conn:
+            rec_type = await conn.fetchval(
+                "SELECT recommendation_type FROM recommendations WHERE ticker='999222'"
+            )
+        assert rec_type == "watch"
+
+    @pytest.mark.asyncio
+    async def test_name_fills_from_kis_when_llm_omits(
+        self, db_pool, crew_with_db, monkeypatch
+    ):
+        """LLM이 name 누락 → KIS API로 즉시 채워서 INSERT."""
+        Crew = crew_with_db
+
+        from crews.stock_recommendation import crew as crew_mod
+
+        def _fake_kis(ticker):
+            return "테스트종목" if ticker == "018880" else None
+
+        monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _fake_kis)
+
+        items = [{"ticker": "018880", "recommendation_type": "watch", "score": 60}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        async with db_pool.acquire() as conn:
+            name = await conn.fetchval(
+                "SELECT name FROM recommendations WHERE ticker='018880'"
+            )
+        assert name == "테스트종목"
+
+    @pytest.mark.asyncio
+    async def test_llm_name_overrides_kis(self, db_pool, crew_with_db, monkeypatch):
+        """LLM이 name 명시 → KIS 호출 안 함."""
+        Crew = crew_with_db
+        from crews.stock_recommendation import crew as crew_mod
+        kis_calls = {"count": 0}
+
+        def _spy_kis(ticker):
+            kis_calls["count"] += 1
+            return "다른이름"
+
+        monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _spy_kis)
+
+        items = [{"ticker": "005930", "name": "삼성전자",
+                  "recommendation_type": "buy_hedge", "score": 80}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        async with db_pool.acquire() as conn:
+            name = await conn.fetchval(
+                "SELECT name FROM recommendations WHERE ticker='005930'"
+            )
+        assert name == "삼성전자"
+        assert kis_calls["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_name_null_when_kis_fails(self, db_pool, crew_with_db, monkeypatch):
+        """LLM 누락 + KIS 실패(None) → name=NULL INSERT (notifier가 holdings 폴백 시도)."""
+        Crew = crew_with_db
+        from crews.stock_recommendation import crew as crew_mod
+
+        def _fail_kis(ticker):
+            return None
+
+        monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _fail_kis)
+
+        items = [{"ticker": "018880", "recommendation_type": "watch", "score": 60}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        crew.on_complete(json.dumps(items), {
+            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+        })
+        async with db_pool.acquire() as conn:
+            name = await conn.fetchval(
+                "SELECT name FROM recommendations WHERE ticker='018880'"
+            )
+        assert name is None
+
+
 # ─── Tool 단위 테스트 ──────────────────────────────────────────────
 
 
@@ -249,8 +398,32 @@ class TestTools:
         assert parsed["items"][0]["ticker"] == "005930"
 
     @pytest.mark.asyncio
+    async def test_signal_query_tickers_filter(self, db_pool, reset_psycopg_pool):
+        """SignalQueryTool — tickers 인자로 보유 종목 강도 평가 (consecutive=2도 반환)."""
+        from tests.factories import SignalFactory
+        target = date(2026, 5, 4)
+        await SignalFactory.create(db_pool, target, "005930", consecutive_buy_days=2)
+        await SignalFactory.create(db_pool, target, "000660", consecutive_buy_days=5)
+        await SignalFactory.create(db_pool, target, "003690", consecutive_buy_days=1)
+
+        from crews.stock_recommendation.tools import SignalQueryTool
+        tool = SignalQueryTool()
+        # min_consecutive=0 + tickers 지정 → 보유 종목 모두 반환
+        out = tool._run(
+            target_date=target.isoformat(),
+            min_consecutive=0,
+            tickers=["005930", "003690"],
+        )
+        parsed = _peel_tool_output(out)
+        assert parsed["count"] == 2
+        tickers_returned = {r["ticker"] for r in parsed["items"]}
+        assert tickers_returned == {"005930", "003690"}
+        # 000660은 미요청이라 제외
+        assert "000660" not in tickers_returned
+
+    @pytest.mark.asyncio
     async def test_crew_007_news_query_tool(self, db_pool, reset_psycopg_pool):
-        """CREW-007: NewsQueryTool — 지정 종목의 뉴스만 반환."""
+        """CREW-007: NewsQueryTool — 지정 종목의 뉴스만 반환 (단일 날짜 범위)."""
         from tests.factories import SignalFactory
         target = date(2026, 4, 28)
         await SignalFactory.create_news(db_pool, target, "005930", title="삼성 호재")
@@ -258,10 +431,40 @@ class TestTools:
 
         from crews.stock_recommendation.tools import NewsQueryTool
         tool = NewsQueryTool()
-        out = tool._run(target_date=target.isoformat(), tickers=["005930"])
+        out = tool._run(
+            date_from=target.isoformat(),
+            date_to=target.isoformat(),
+            tickers=["005930"],
+        )
         parsed = _peel_tool_output(out)
         assert parsed["count"] == 1
         assert parsed["items"][0]["title"] == "삼성 호재"
+        assert parsed["items"][0]["date"] == target.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_crew_007_news_query_tool_date_range(self, db_pool, reset_psycopg_pool):
+        """NewsQueryTool — 날짜 범위에 걸쳐 휴장일 갭 뉴스 모두 반환."""
+        from tests.factories import SignalFactory
+        signal_date = date(2026, 5, 4)  # 월
+        target_trading = date(2026, 5, 6)  # 수 (5/5 어린이날 휴장 끼어 있음)
+        await SignalFactory.create_news(
+            db_pool, signal_date, "005930", title="씨티 목표가 하향"
+        )
+        await SignalFactory.create_news(
+            db_pool, target_trading, "005930", title="반도체 랠리 호재"
+        )
+
+        from crews.stock_recommendation.tools import NewsQueryTool
+        tool = NewsQueryTool()
+        out = tool._run(
+            date_from=signal_date.isoformat(),
+            date_to=target_trading.isoformat(),
+            tickers=["005930"],
+        )
+        parsed = _peel_tool_output(out)
+        assert parsed["count"] == 2
+        dates = {item["date"] for item in parsed["items"]}
+        assert dates == {"2026-05-04", "2026-05-06"}
 
     @pytest.mark.asyncio
     async def test_crew_007_macro_query_tool(self, db_pool, reset_psycopg_pool):

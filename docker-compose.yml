@@ -13,6 +13,9 @@ volumes:
   kafka-data:
   loki-data:
   grafana-data:
+  # KIS OAuth 토큰 공유 캐시 — backend/crewai/worker-data-collector가 같이 read/write.
+  # 1분 내 재발급 차단 정책 회피. 컨테이너 재시작 후 재사용.
+  kis-token-cache:
 
 services:
 
@@ -127,8 +130,14 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
       - BACKEND_LOG_LEVEL=${BACKEND_LOG_LEVEL}
       - CORS_ORIGINS=${CORS_ORIGINS}
+      # KIS API — POST /holdings에서 종목명 즉시 조회용. 키 미설정 시 worker-data-collector 폴백.
+      - KIS_APP_KEY=${KIS_APP_KEY:-}
+      - KIS_APP_SECRET=${KIS_APP_SECRET:-}
+      - KIS_BASE_URL=${KIS_BASE_URL:-}
+      - KIS_TR_SEARCH_STOCK_INFO=${KIS_TR_SEARCH_STOCK_INFO:-CTPF1002R}
     volumes:
       - ./shared/schemas:/app/schemas:ro
+      - kis-token-cache:/var/cache/kis
     ports:
       - "8000:8000"
     healthcheck:
@@ -154,8 +163,14 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME}
+      # KIS API — on_complete()에서 recommendations.name 즉시 채우기용. 키 미설정 시 NULL fallback.
+      - KIS_APP_KEY=${KIS_APP_KEY:-}
+      - KIS_APP_SECRET=${KIS_APP_SECRET:-}
+      - KIS_BASE_URL=${KIS_BASE_URL:-}
+      - KIS_TR_SEARCH_STOCK_INFO=${KIS_TR_SEARCH_STOCK_INFO:-CTPF1002R}
     volumes:
       - ./shared/schemas:/app/schemas:ro
+      - kis-token-cache:/var/cache/kis
 
   scheduler:
     build:
@@ -169,8 +184,11 @@ services:
       - VIBE_ENV=${VIBE_ENV}
       - TZ=${TZ}
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
-      - SCHEDULE_HOUR=${SCHEDULE_HOUR}
-      - SCHEDULE_MINUTE=${SCHEDULE_MINUTE}
+      # 2-cron: intraday + premarket (코드 default: 16:30 / 06:30 KST). env 비워두면 default 사용.
+      - SCHEDULE_INTRADAY_HOUR=${SCHEDULE_INTRADAY_HOUR:-}
+      - SCHEDULE_INTRADAY_MINUTE=${SCHEDULE_INTRADAY_MINUTE:-}
+      - SCHEDULE_PREMARKET_HOUR=${SCHEDULE_PREMARKET_HOUR:-}
+      - SCHEDULE_PREMARKET_MINUTE=${SCHEDULE_PREMARKET_MINUTE:-}
     volumes:
       - ./shared/schemas:/app/schemas:ro
 
@@ -197,6 +215,7 @@ services:
       - KIS_TR_SEARCH_STOCK_INFO=${KIS_TR_SEARCH_STOCK_INFO:-CTPF1002R}
     volumes:
       - ./shared/schemas:/app/schemas:ro
+      - kis-token-cache:/var/cache/kis
 
   worker-telegram-notifier:
     build:

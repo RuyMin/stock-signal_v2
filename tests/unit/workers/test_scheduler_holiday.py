@@ -64,6 +64,31 @@ class TestPreviousBusinessDay:
         assert previous_business_day(date(2026, 5, 6)) == date(2026, 5, 4)
 
 
+class TestHolidaysBetween:
+    """holidays_between은 (start, end) 사이 휴장일 메타 반환."""
+
+    def test_consecutive_business_days_no_gap(self):
+        from main import holidays_between
+        # 4/29 수 → 4/30 목 (연속 평일, 갭 없음)
+        assert holidays_between(date(2026, 4, 29), date(2026, 4, 30)) == []
+
+    def test_weekend_gap(self):
+        from main import holidays_between
+        # 5/1 금 → 5/4 월 사이 = 5/2 토, 5/3 일
+        result = holidays_between(date(2026, 5, 1), date(2026, 5, 4))
+        dates = [r["date"] for r in result]
+        assert dates == ["2026-05-02", "2026-05-03"]
+        assert all("주말" in r["reason"] for r in result)
+
+    def test_korean_holiday_gap(self):
+        from main import holidays_between
+        # 5/4 월 → 5/6 수 사이 = 5/5 어린이날
+        result = holidays_between(date(2026, 5, 4), date(2026, 5, 6))
+        assert len(result) == 1
+        assert result[0]["date"] == "2026-05-05"
+        assert "어린이날" in result[0]["reason"]
+
+
 def _patch_producer(monkeypatch):
     import main as sched
     sent: list[tuple[str, dict]] = []
@@ -131,6 +156,28 @@ class TestTriggerPremarket:
         assert payload["target_date"] == "2026-04-29"
         # target_trading_date = 오늘(목요일 4/30)
         assert payload["target_trading_date"] == "2026-04-30"
+        # 평일 연속 → 휴장일 갭 없음
+        assert payload["holiday_gap_days"] == 0
+        assert payload["holidays_in_gap"] == []
+
+    @pytest.mark.asyncio
+    async def test_premarket_after_holiday_includes_gap_meta(self, monkeypatch):
+        """5/6 수 새벽 트리거 → signal=5/4 월. 갭에 5/5(어린이날) 포함."""
+        from freezegun import freeze_time
+        import main as sched
+        sent = _patch_producer(monkeypatch)
+
+        with freeze_time(_kst(2026, 5, 6, 6, 30)):
+            await sched.trigger_premarket()
+
+        assert len(sent) == 1
+        _, payload = sent[0]
+        assert payload["target_date"] == "2026-05-04"
+        assert payload["target_trading_date"] == "2026-05-06"
+        assert payload["holiday_gap_days"] == 1
+        assert len(payload["holidays_in_gap"]) == 1
+        assert payload["holidays_in_gap"][0]["date"] == "2026-05-05"
+        assert "어린이날" in payload["holidays_in_gap"][0]["reason"]
 
     @pytest.mark.asyncio
     async def test_today_holiday_skip(self, monkeypatch):

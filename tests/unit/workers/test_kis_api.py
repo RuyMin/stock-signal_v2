@@ -30,9 +30,17 @@ def _make_client():
     return KisApiClient(app_key="ak", app_secret="as", base_url=BASE_URL)
 
 
+@pytest.fixture(autouse=True)
+def isolated_token_cache(tmp_path, monkeypatch):
+    """단위 테스트는 임시 경로의 파일 캐시 사용 — /var/cache/kis 격리."""
+    from clients import kis_api as mod
+    monkeypatch.setattr(mod, "TOKEN_CACHE_PATH", str(tmp_path / "token.json"))
+
+
 class TestKisToken:
     @pytest.mark.asyncio
     async def test_token_issued_and_cached(self):
+        """메모리 캐시 — 같은 인스턴스 두 번째 호출은 KIS 호출 안 함."""
         client = _make_client()
         with respx.mock(assert_all_called=False) as mock:
             tok = mock.post(TOKEN_URL).mock(
@@ -44,7 +52,72 @@ class TestKisToken:
             t2 = await client._ensure_token()
             assert t1 == "tok-1"
             assert t2 == "tok-1"
-            assert tok.call_count == 1  # 두 번째는 캐시
+            assert tok.call_count == 1
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_token_persisted_to_file_after_issue(self):
+        """발급 성공 시 토큰이 파일 캐시에 저장되어야."""
+        import json
+        from clients import kis_api as mod
+
+        client = _make_client()
+        with respx.mock(assert_all_called=False) as mock:
+            mock.post(TOKEN_URL).mock(
+                return_value=Response(
+                    200, json={"access_token": "tok-saved", "expires_in": 86400}
+                )
+            )
+            await client._ensure_token()
+
+        with open(mod.TOKEN_CACHE_PATH) as f:
+            cached = json.load(f)
+        assert cached["token"] == "tok-saved"
+        assert cached["expires_at"] > 0
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_token_loaded_from_file_no_kis_call(self):
+        """파일에 유효한 토큰 미리 있으면 새 인스턴스가 KIS 호출 없이 사용."""
+        import json
+        import time as _time
+        from clients import kis_api as mod
+
+        # 사전에 다른 컨테이너가 발급한 시나리오 — 파일에 직접 저장
+        with open(mod.TOKEN_CACHE_PATH, "w") as f:
+            json.dump(
+                {"token": "tok-shared", "expires_at": _time.time() + 86400}, f
+            )
+
+        client = _make_client()
+        with respx.mock(assert_all_called=False) as mock:
+            tok = mock.post(TOKEN_URL).mock(return_value=Response(500))  # 호출되면 실패
+            t = await client._ensure_token()
+            assert t == "tok-shared"
+            assert tok.call_count == 0  # 파일 캐시 hit, KIS 호출 안 함
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_token_file_cache_skipped_when_expired(self):
+        """파일 캐시가 만료 임박이면 무시하고 새 발급."""
+        import json
+        import time as _time
+        from clients import kis_api as mod
+
+        with open(mod.TOKEN_CACHE_PATH, "w") as f:
+            json.dump(
+                {"token": "tok-expired", "expires_at": _time.time() + 30}, f  # 30초 후 만료
+            )
+
+        client = _make_client()
+        with respx.mock(assert_all_called=False) as mock:
+            mock.post(TOKEN_URL).mock(
+                return_value=Response(
+                    200, json={"access_token": "tok-fresh", "expires_in": 86400}
+                )
+            )
+            t = await client._ensure_token()
+            assert t == "tok-fresh"  # 만료 임박이라 새 발급
         await client.aclose()
 
 

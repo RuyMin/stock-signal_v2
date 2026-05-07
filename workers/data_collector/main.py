@@ -117,6 +117,9 @@ async def run() -> None:
                         "job_id": job_id,
                         "target_date": target_date.isoformat(),
                         "target_trading_date": target_trading_date.isoformat(),
+                        # scheduler가 계산한 휴장일 갭 메타 forwarding (LLM 컨텍스트용)
+                        "holiday_gap_days": int(event.get("holiday_gap_days") or 0),
+                        "holidays_in_gap": event.get("holidays_in_gap") or [],
                         **result,
                     }
 

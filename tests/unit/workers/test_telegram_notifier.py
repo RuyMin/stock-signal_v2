@@ -123,17 +123,105 @@ class TestFanOut:
         assert "72,000" in text
 
     @pytest.mark.asyncio
-    async def test_wrk_010_exit_alert_with_holdings_label(self, db_pool):
+    async def test_wrk_010_exit_alert_in_holdings_section(self, db_pool):
+        """exit_alert는 '내 보유 종목 평가' 섹션 안에 분류 라벨과 함께."""
         from formatter import RecItem, format_message
         item = RecItem(
             ticker="005930", name="삼성전자",
             recommendation_type="exit_alert", score=40,
             reason_supply="기관 매도 전환", reason_news=None, reason_macro=None,
-            estimated_avg_price=None,
+            estimated_avg_price=None, is_holding=True,
         )
         text = format_message(date(2026, 4, 28), date(2026, 4, 29), [item])
-        assert "🔴 탈출 경보 (1종목 — 보유)" in text
+        assert "📌 내 보유 종목 평가" in text
+        assert "🔴 `삼성전자(005930)`" in text
+        assert "탈출 경보" in text
         assert "익절/손절" in text
+
+    @pytest.mark.asyncio
+    async def test_holdings_in_holdings_section(self, db_pool):
+        """is_holding=True → '📌 내 보유 종목 평가' 섹션, 분류는 종목 줄에 텍스트로."""
+        from formatter import RecItem, format_message
+        held = RecItem(
+            ticker="005930", name="삼성전자",
+            recommendation_type="watch", score=55,
+            reason_supply="단발성 매수", reason_news=None, reason_macro=None,
+            estimated_avg_price=None, is_holding=True,
+        )
+        text = format_message(date(2026, 4, 28), date(2026, 4, 29), [held])
+        assert "📌 내 보유 종목 평가 (1종목)" in text
+        assert "🔍 신규 추천" not in text
+        assert "🟡 `삼성전자(005930)`" in text
+        assert "관망" in text
+
+    @pytest.mark.asyncio
+    async def test_mixed_holding_and_new_separate_sections(self, db_pool):
+        """보유+신규 혼합 — 두 섹션 각각 표시. 어떤 종목이 어디 있는지 한눈."""
+        from formatter import RecItem, format_message
+        held = RecItem(
+            ticker="005930", name="삼성전자",
+            recommendation_type="watch", score=55,
+            reason_supply="...", reason_news=None, reason_macro=None,
+            estimated_avg_price=None, is_holding=True,
+        )
+        new = RecItem(
+            ticker="018880", name="한국공항",
+            recommendation_type="watch", score=60,
+            reason_supply="...", reason_news=None, reason_macro=None,
+            estimated_avg_price=None, is_holding=False,
+        )
+        text = format_message(date(2026, 4, 28), date(2026, 4, 29), [held, new])
+        assert "📌 내 보유 종목 평가 (1종목)" in text
+        assert "🔍 신규 추천 (1종목)" in text
+        # 보유 섹션이 먼저 나오는지 (헤더 위치)
+        idx_holdings = text.index("📌 내 보유 종목 평가")
+        idx_new = text.index("🔍 신규 추천")
+        assert idx_holdings < idx_new
+        # 각 종목이 자기 섹션에 들어갔는지 — 종목 자체는 단순 문자열로
+        assert "삼성전자(005930)" in text
+        assert "한국공항(018880)" in text
+
+    @pytest.mark.asyncio
+    async def test_no_holding_no_holdings_section(self, db_pool):
+        """모두 신규 후보면 보유 섹션 없음, 신규 섹션만."""
+        from formatter import RecItem, format_message
+        new = RecItem(
+            ticker="018880", name="한국공항",
+            recommendation_type="watch", score=60,
+            reason_supply="...", reason_news=None, reason_macro=None,
+            estimated_avg_price=None, is_holding=False,
+        )
+        text = format_message(date(2026, 4, 28), date(2026, 4, 29), [new])
+        assert "📌 내 보유 종목 평가" not in text
+        assert "🔍 신규 추천 (1종목)" in text
+        assert "⭐" not in text  # ⭐ 마크는 더 이상 사용 안 함
+
+    @pytest.mark.asyncio
+    async def test_processor_assigns_section_per_user(self, db_pool):
+        """notify() — 동일 ticker라도 사용자 A 보유면 보유 섹션, B 미보유면 신규 섹션."""
+        from tests.factories import HoldingFactory, RecommendationFactory, UserFactory
+
+        chat_a, chat_b = 11111111, 22222222
+        await UserFactory.create(db_pool, chat_id=chat_a, status="active")
+        await UserFactory.create(db_pool, chat_id=chat_b, status="active")
+        # A만 005930 보유, B는 보유 X
+        await HoldingFactory.create(db_pool, ticker="005930", chat_id=chat_a)
+        await RecommendationFactory.create(
+            db_pool, date(2026, 4, 28), date(2026, 4, 29),
+            ticker="005930", recommendation_type="watch", score=55,
+        )
+
+        from processor import notify
+        bot = FakeBot()
+        await notify(db_pool, bot, date(2026, 4, 29))
+
+        text_a = next(s["text"] for s in bot.sent if s["chat_id"] == str(chat_a))
+        text_b = next(s["text"] for s in bot.sent if s["chat_id"] == str(chat_b))
+        # A: 보유 섹션 / B: 신규 섹션
+        assert "📌 내 보유 종목 평가" in text_a
+        assert "🔍 신규 추천" not in text_a
+        assert "📌 내 보유 종목 평가" not in text_b
+        assert "🔍 신규 추천" in text_b
 
     @pytest.mark.asyncio
     async def test_wrk_011_zero_recommendations_message(self, db_pool):

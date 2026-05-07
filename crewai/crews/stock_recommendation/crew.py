@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 from crewai import Process
 
+from clients import kis_api
 from core.base_crew import BaseCrew
 from core.db import get_pool
 
@@ -54,7 +55,14 @@ class StockRecommendationCrew(BaseCrew):
         return [signal_task, news_task, macro_task, synth_task]
 
     def on_complete(self, raw_result: Any, inputs: dict) -> dict:
-        """Synthesizer 출력(JSON 배열) 파싱 → recommendations INSERT."""
+        """Synthesizer 출력(JSON 배열) 파싱 → recommendations INSERT.
+
+        후처리 강제 (LLM 분류 룰 일탈 방지):
+          - score ≥ 70 → buy_hedge
+          - 50 ≤ score < 70 → watch
+          - score < 50 AND 보유 → exit_alert
+          - score < 50 AND 신규 → 제외 (시장 추천 가치 없음)
+        """
         target_date = date_type.fromisoformat(inputs["target_date"])
         target_trading_date = date_type.fromisoformat(inputs["target_trading_date"])
 
@@ -67,7 +75,46 @@ class StockRecommendationCrew(BaseCrew):
         if items:
             with get_pool().connection() as conn:
                 with conn.cursor() as cur:
+                    # 보유 종목 합집합 조회 (분류 후처리용 — score<50 보유는 exit_alert 강제)
+                    cur.execute("SELECT DISTINCT ticker FROM holdings")
+                    holdings_set = {r[0] for r in cur.fetchall()}
+
                     for it in items:
+                        ticker = it["ticker"]
+                        score = int(it["score"])
+                        is_holding = ticker in holdings_set
+                        llm_type = it.get("recommendation_type")
+
+                        # name 보강: LLM 명시 우선 → KIS API 즉시 조회 → NULL fallback
+                        # (notifier가 holdings.name으로 추가 fallback 시도)
+                        rec_name = (it.get("name") or "").strip() or None
+                        if rec_name is None:
+                            rec_name = kis_api.fetch_ticker_name(ticker)
+
+                        # score 기반 type 강제 재분류
+                        if score >= 70:
+                            rec_type = "buy_hedge"
+                        elif score >= 50:
+                            rec_type = "watch"
+                        elif is_holding:
+                            rec_type = "exit_alert"
+                        else:
+                            # 신규 후보 score<50 → 시장 추천 가치 없음, 제외
+                            logger.info(
+                                "skipped_low_score_new_candidate",
+                                ticker=ticker, score=score,
+                            )
+                            continue
+
+                        # LLM 분류와 강제 재분류 차이 모니터링
+                        if llm_type != rec_type:
+                            logger.info(
+                                "type_reclassified",
+                                ticker=ticker, score=score,
+                                llm_type=llm_type, enforced_type=rec_type,
+                                is_holding=is_holding,
+                            )
+
                         cur.execute(
                             """
                             INSERT INTO recommendations (
@@ -85,10 +132,10 @@ class StockRecommendationCrew(BaseCrew):
                             (
                                 target_date,
                                 target_trading_date,
-                                it["ticker"],
-                                it.get("name"),
-                                it["recommendation_type"],
-                                int(it["score"]),
+                                ticker,
+                                rec_name,
+                                rec_type,
+                                score,
                                 it.get("reason_supply"),
                                 it.get("reason_news"),
                                 it.get("reason_macro"),
@@ -97,15 +144,12 @@ class StockRecommendationCrew(BaseCrew):
                             ),
                         )
                         inserted += 1
-                        rt = it["recommendation_type"]
-                        has_buy_hedge |= rt == "buy_hedge"
-                        has_watch |= rt == "watch"
-                        has_exit_alert |= rt == "exit_alert"
+                        has_buy_hedge |= rec_type == "buy_hedge"
+                        has_watch |= rec_type == "watch"
+                        has_exit_alert |= rec_type == "exit_alert"
                         logger.info(
                             "recommendation_created",
-                            ticker=it["ticker"],
-                            type=rt,
-                            score=it["score"],
+                            ticker=ticker, type=rec_type, score=score,
                         )
                 conn.commit()
 

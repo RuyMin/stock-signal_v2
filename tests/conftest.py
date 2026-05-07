@@ -131,8 +131,12 @@ async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
 
 
 @pytest_asyncio.fixture
-async def api_client(db_pool):
-    """httpx ASGI 클라이언트 — backend.main:app 직접 호출."""
+async def api_client(db_pool, monkeypatch):
+    """httpx ASGI 클라이언트 — backend.main:app 직접 호출.
+
+    KIS API 호출은 자동으로 차단(None 반환)해 외부 의존성 제거.
+    KIS 호출을 검증하는 테스트는 monkeypatch로 다시 덮어쓰면 됨.
+    """
     import sys
 
     backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
@@ -144,6 +148,12 @@ async def api_client(db_pool):
 
     from httpx import ASGITransport, AsyncClient
     from main import app
+    from clients import kis_api
+
+    async def _no_kis_call(ticker: str):
+        return None
+
+    monkeypatch.setattr(kis_api, "fetch_ticker_name", _no_kis_call)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

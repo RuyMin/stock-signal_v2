@@ -70,6 +70,189 @@ class TestPostHolding:
         assert resp2.status_code == 409
         assert resp2.json()["error_code"] == "INVALID_REQUEST"
 
+    @pytest.mark.asyncio
+    async def test_add_with_avg_price(self, api_client, db_pool):
+        """avg_price 포함 추가 → 응답에 평단가 반영."""
+        resp = await api_client.post(
+            "/holdings",
+            json={"ticker": "005930", "chat_id": CHAT_ID, "avg_price": "75000"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["ticker"] == "005930"
+        assert body["avg_price"] == "75000.00"
+
+    @pytest.mark.asyncio
+    async def test_add_with_name(self, api_client, db_pool):
+        """name 포함 추가 → 응답에 종목명 반영 (worker가 NULL일 때만 채우는 정책)."""
+        resp = await api_client.post(
+            "/holdings",
+            json={"ticker": "003690", "chat_id": CHAT_ID, "name": "코리안리"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["ticker"] == "003690"
+        assert body["name"] == "코리안리"
+
+    @pytest.mark.asyncio
+    async def test_add_with_name_and_price(self, api_client, db_pool):
+        """name + avg_price 동시 추가 → 둘 다 반영."""
+        resp = await api_client.post(
+            "/holdings",
+            json={
+                "ticker": "003690", "chat_id": CHAT_ID,
+                "name": "코리안리", "avg_price": "5500",
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["name"] == "코리안리" and body["avg_price"] == "5500.00"
+
+    @pytest.mark.asyncio
+    async def test_add_kis_lookup_fills_name(self, api_client, db_pool, monkeypatch):
+        """name 미지정 + KIS 응답 있음 → backend가 KIS로 종목명 즉시 채움."""
+        from clients import kis_api
+
+        async def _fake_kis(ticker: str):
+            assert ticker == "005930"
+            return "삼성전자"
+
+        monkeypatch.setattr(kis_api, "fetch_ticker_name", _fake_kis)
+
+        resp = await api_client.post(
+            "/holdings", json={"ticker": "005930", "chat_id": CHAT_ID}
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "삼성전자"
+
+    @pytest.mark.asyncio
+    async def test_add_kis_failure_falls_back_to_null(self, api_client, db_pool, monkeypatch):
+        """KIS 호출 실패(None 반환) → name=null로 INSERT (worker 폴백 대기)."""
+        from clients import kis_api
+
+        async def _fail_kis(ticker: str):
+            return None
+
+        monkeypatch.setattr(kis_api, "fetch_ticker_name", _fail_kis)
+
+        resp = await api_client.post(
+            "/holdings", json={"ticker": "999111", "chat_id": CHAT_ID}
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] is None
+
+    @pytest.mark.asyncio
+    async def test_add_user_name_overrides_kis(self, api_client, db_pool, monkeypatch):
+        """사용자가 name 명시하면 KIS 호출 안 함 — 사용자 입력 우선."""
+        from clients import kis_api
+        kis_called = {"count": 0}
+
+        async def _spy_kis(ticker: str):
+            kis_called["count"] += 1
+            return "원래종목명"
+
+        monkeypatch.setattr(kis_api, "fetch_ticker_name", _spy_kis)
+
+        resp = await api_client.post(
+            "/holdings",
+            json={"ticker": "005930", "chat_id": CHAT_ID, "name": "내별명"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "내별명"
+        assert kis_called["count"] == 0
+
+
+class TestPatchHolding:
+    """PATCH /holdings/{ticker} — 평단가 갱신."""
+
+    @pytest.mark.asyncio
+    async def test_set_avg_price(self, api_client, db_pool):
+        """기존 holding의 avg_price 갱신 → 200 + 새 값."""
+        await api_client.post("/holdings", json={"ticker": "005930", "chat_id": CHAT_ID})
+        resp = await api_client.patch(
+            "/holdings/005930",
+            params={"chat_id": CHAT_ID},
+            json={"avg_price": "82500.50"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["avg_price"] == "82500.50"
+
+    @pytest.mark.asyncio
+    async def test_clear_avg_price(self, api_client, db_pool):
+        """avg_price=null 송신 → 200 + null로 clear."""
+        await api_client.post(
+            "/holdings",
+            json={"ticker": "005930", "chat_id": CHAT_ID, "avg_price": "75000"},
+        )
+        resp = await api_client.patch(
+            "/holdings/005930",
+            params={"chat_id": CHAT_ID},
+            json={"avg_price": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["avg_price"] is None
+
+    @pytest.mark.asyncio
+    async def test_set_name(self, api_client, db_pool):
+        """기존 holding의 name PATCH → 200 + 새 이름."""
+        await api_client.post("/holdings", json={"ticker": "003690", "chat_id": CHAT_ID})
+        resp = await api_client.patch(
+            "/holdings/003690",
+            params={"chat_id": CHAT_ID},
+            json={"name": "코리안리"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "코리안리"
+
+    @pytest.mark.asyncio
+    async def test_patch_name_only_does_not_touch_price(self, api_client, db_pool):
+        """name만 PATCH → 기존 avg_price 유지 (exclude_unset 검증)."""
+        await api_client.post(
+            "/holdings",
+            json={"ticker": "003690", "chat_id": CHAT_ID, "avg_price": "5500"},
+        )
+        resp = await api_client.patch(
+            "/holdings/003690",
+            params={"chat_id": CHAT_ID},
+            json={"name": "코리안리"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["name"] == "코리안리" and body["avg_price"] == "5500.00"
+
+    @pytest.mark.asyncio
+    async def test_patch_nonexistent_ticker(self, api_client, db_pool):
+        """등록되지 않은 ticker PATCH → 404 HOLDING_NOT_FOUND."""
+        resp = await api_client.patch(
+            "/holdings/999999",
+            params={"chat_id": CHAT_ID},
+            json={"avg_price": "100"},
+        )
+        assert resp.status_code == 404
+        assert resp.json()["error_code"] == "HOLDING_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_patch_invalid_ticker_format(self, api_client, db_pool):
+        """ticker 형식 오류 → 400 INVALID_REQUEST."""
+        resp = await api_client.patch(
+            "/holdings/abc",
+            params={"chat_id": CHAT_ID},
+            json={"avg_price": "100"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error_code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_patch_negative_price_rejected(self, api_client, db_pool):
+        """음수 평단가 → 422 (Pydantic ge=0)."""
+        await api_client.post("/holdings", json={"ticker": "005930", "chat_id": CHAT_ID})
+        resp = await api_client.patch(
+            "/holdings/005930",
+            params={"chat_id": CHAT_ID},
+            json={"avg_price": "-100"},
+        )
+        assert resp.status_code == 422
+
 
 class TestGetHoldings:
     """GET /holdings — TEST_SPEC §1.2"""

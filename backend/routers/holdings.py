@@ -1,8 +1,9 @@
 """holdings CRUD — 사용자별 보유 종목 관리 (multi-user, 소규모 화이트리스트).
 
 API:
-  POST   /holdings                     — 종목 추가 (ticker + chat_id 필수)
-  GET    /holdings?chat_id=...         — 사용자별 보유 종목 목록
+  POST   /holdings                       — 종목 추가 (ticker + chat_id, avg_price 선택)
+  GET    /holdings?chat_id=...           — 사용자별 보유 종목 목록
+  PATCH  /holdings/{ticker}?chat_id=...  — 사용자별 종목 부분 갱신 (현재 avg_price)
   DELETE /holdings/{ticker}?chat_id=...  — 사용자별 종목 제거
 
 각 요청은 chat_id로 사용자 식별. listener가 텔레그램 사용자별로 chat_id 전달.
@@ -18,6 +19,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clients import kis_api
 from core.database import get_db
 from core.exceptions import VibeException
 from models.holding import Holding
@@ -26,6 +28,7 @@ from schemas.holdings import (  # type: ignore[import-not-found]
     HoldingCreateRequest,
     HoldingListResponse,
     HoldingResponse,
+    HoldingUpdateRequest,
 )
 
 logger = structlog.get_logger()
@@ -74,7 +77,17 @@ async def add_holding(
     _validate_ticker(payload.ticker)
     user = await _resolve_active_user(db, payload.chat_id)
 
-    holding = Holding(user_id=user.id, ticker=payload.ticker)
+    # name: 사용자 명시 입력 우선. 없으면 KIS API로 즉시 조회 (실패 시 NULL — worker fallback).
+    resolved_name: str | None = payload.name
+    if resolved_name is None:
+        resolved_name = await kis_api.fetch_ticker_name(payload.ticker)
+
+    holding = Holding(
+        user_id=user.id,
+        ticker=payload.ticker,
+        name=resolved_name,
+        avg_price=payload.avg_price,
+    )
     db.add(holding)
     try:
         await db.commit()
@@ -94,6 +107,50 @@ async def add_holding(
         holding_id=holding.id,
         user_id=user.id,
         chat_id=user.chat_id,
+        avg_price=str(holding.avg_price) if holding.avg_price is not None else None,
+    )
+    return HoldingResponse.model_validate(holding)
+
+
+@router.patch("/{ticker}", response_model=HoldingResponse)
+async def update_holding(
+    ticker: str,
+    payload: HoldingUpdateRequest,
+    chat_id: int = Query(..., description="텔레그램 chat_id"),
+    db: AsyncSession = Depends(get_db),
+) -> HoldingResponse:
+    """보유 종목 부분 갱신. 현재 avg_price만 갱신 가능."""
+    _validate_ticker(ticker)
+    user = await _resolve_active_user(db, chat_id)
+
+    q = await db.execute(
+        select(Holding).where(Holding.user_id == user.id, Holding.ticker == ticker)
+    )
+    holding = q.scalar_one_or_none()
+    if holding is None:
+        raise VibeException(
+            error_code="HOLDING_NOT_FOUND",
+            message="등록된 보유 종목이 아닙니다",
+            status_code=404,
+            detail={"ticker": ticker, "chat_id": chat_id},
+        )
+
+    fields = payload.model_dump(exclude_unset=True)
+    if "avg_price" in fields:
+        holding.avg_price = fields["avg_price"]
+    if "name" in fields:
+        holding.name = fields["name"]
+    await db.commit()
+    await db.refresh(holding)
+
+    logger.info(
+        "holding_updated",
+        ticker=holding.ticker,
+        holding_id=holding.id,
+        user_id=user.id,
+        chat_id=user.chat_id,
+        name=holding.name,
+        avg_price=str(holding.avg_price) if holding.avg_price is not None else None,
     )
     return HoldingResponse.model_validate(holding)
 

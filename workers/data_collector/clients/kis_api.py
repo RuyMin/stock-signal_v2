@@ -16,6 +16,7 @@ Rate limit: 실전 REST 초당 20건. 일별 1회 배치라 여유 있음.
 holdings 종목명 채우기는 종목당 0.05초 간격 권장.
 """
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -35,6 +36,34 @@ API_FOREIGN_INSTITUTION_TOTAL = "/uapi/domestic-stock/v1/quotations/foreign-inst
 API_SEARCH_STOCK_INFO = "/uapi/domestic-stock/v1/quotations/search-stock-info"
 
 CUSTTYPE_PERSONAL = "P"  # 개인 — 법인은 'B'
+
+# 공유 docker volume — backend/crewai/data-collector가 같이 read/write.
+# 컨테이너 재시작/멀티 컨테이너에서 1분 재발급 차단 회피.
+TOKEN_CACHE_PATH = os.getenv("KIS_TOKEN_CACHE_PATH", "/var/cache/kis/token.json")
+
+
+def _load_token_cache() -> Optional[tuple[str, float]]:
+    try:
+        with open(TOKEN_CACHE_PATH) as f:
+            data = json.load(f)
+        token = data.get("token")
+        expires_at = float(data.get("expires_at", 0))
+        if token and expires_at > 0:
+            return token, expires_at
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _save_token_cache(token: str, expires_at: float) -> None:
+    try:
+        os.makedirs(os.path.dirname(TOKEN_CACHE_PATH), exist_ok=True)
+        tmp = TOKEN_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"token": token, "expires_at": expires_at}, f)
+        os.replace(tmp, TOKEN_CACHE_PATH)
+    except OSError as exc:
+        logger.warning("kis_token_cache_save_failed", error=str(exc))
 
 
 @dataclass(slots=True)
@@ -73,23 +102,41 @@ class KisApiClient:
         await self._client.aclose()
 
     async def _ensure_token(self) -> str:
-        # 토큰 만료 60초 전이면 갱신
+        # 1. 메모리 캐시 (만료 60초 전)
         if self._token and self._token_expires_at - time.time() > 60:
             return self._token
 
+        # 2. 파일 캐시 (다른 컨테이너가 발급해뒀을 수 있음)
+        cached = _load_token_cache()
+        if cached is not None and cached[1] - time.time() > 60:
+            self._token, self._token_expires_at = cached
+            logger.info("kis_token_loaded_from_file_cache")
+            return self._token
+
+        # 3. KIS 발급 시도
         url = f"{self.base_url}/oauth2/tokenP"
         payload = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
-        resp = await self._client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        self._token = data["access_token"]
-        self._token_expires_at = time.time() + int(data.get("expires_in", 86400))
-        logger.info("kis_token_refreshed", expires_in=data.get("expires_in"))
-        return self._token  # type: ignore[return-value]
+        try:
+            resp = await self._client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data["access_token"]
+            self._token_expires_at = time.time() + int(data.get("expires_in", 86400))
+            _save_token_cache(self._token, self._token_expires_at)
+            logger.info("kis_token_refreshed", expires_in=data.get("expires_in"))
+            return self._token  # type: ignore[return-value]
+        except httpx.HTTPError:
+            # 4. 발급 실패 → 파일 재조회 (다른 컨테이너가 막 발급했을 가능성)
+            cached = _load_token_cache()
+            if cached is not None and cached[1] - time.time() > 60:
+                self._token, self._token_expires_at = cached
+                logger.info("kis_token_loaded_after_failure")
+                return self._token
+            raise
 
     def _build_headers(self, tr_id: str) -> dict[str, str]:
         assert self._token is not None

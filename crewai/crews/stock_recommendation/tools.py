@@ -6,6 +6,7 @@
 """
 import json
 from datetime import date as date_type
+from typing import Optional
 
 import structlog
 from pydantic import BaseModel, Field
@@ -23,34 +24,49 @@ class SignalQueryInput(BaseModel):
     target_date: str = Field(description="조회 기준일 (YYYY-MM-DD)")
     min_consecutive: int = Field(
         default=3,
-        description="최소 연속 매수일 (기본 3, PRD 비즈니스 규칙)",
+        description="최소 연속 매수일 (기본 3, PRD 비즈니스 규칙). 보유 종목 강도 평가 시 0 사용.",
+    )
+    tickers: Optional[list[str]] = Field(
+        default=None,
+        description="지정 시 해당 ticker만 반환 (보유 종목 강도 평가용). 미지정 시 모든 ticker.",
     )
 
 
 class SignalQueryTool(VibeBaseTool):
     name: str = "signal_query"
     description: str = (
-        "특정 거래일에 기관/외국인이 N일 이상 연속 순매수한 종목과 수급 데이터를 조회한다. "
-        "추천 후보 풀을 결정할 때 사용."
+        "특정 거래일의 수급 데이터를 조회한다. 두 가지 사용 패턴:\n"
+        "1. 신규 매수 후보 도출: min_consecutive=3 (또는 PRD 기준값), tickers=None — 강한 시그널만.\n"
+        "2. 보유 종목 강도 평가: min_consecutive=0, tickers=[보유 종목 목록] — "
+        "consecutive 무관하게 실제 net_buy 등 데이터 반환.\n"
+        "결과 row가 없으면 그 ticker는 해당 거래일에 데이터 자체가 없음(휴장 또는 미수집)."
     )
     args_schema: type[BaseModel] = SignalQueryInput
 
-    def _run(self, target_date: str, min_consecutive: int = 3) -> str:
+    def _run(
+        self,
+        target_date: str,
+        min_consecutive: int = 3,
+        tickers: Optional[list[str]] = None,
+    ) -> str:
         try:
             d = date_type.fromisoformat(target_date)
+            sql = (
+                "SELECT ticker, agency_net_buy, foreign_net_buy, "
+                "agency_buy, agency_sell, foreign_buy, foreign_sell, "
+                "consecutive_buy_days FROM signals "
+                "WHERE date = %s AND consecutive_buy_days >= %s"
+            )
+            params: list = [d, min_consecutive]
+            if tickers:
+                sql += " AND ticker = ANY(%s)"
+                params.append(tickers)
+            sql += (
+                " ORDER BY consecutive_buy_days DESC, "
+                "(COALESCE(agency_net_buy,0) + COALESCE(foreign_net_buy,0)) DESC"
+            )
             with get_pool().connection() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT ticker, agency_net_buy, foreign_net_buy,
-                           agency_buy, agency_sell, foreign_buy, foreign_sell,
-                           consecutive_buy_days
-                    FROM signals
-                    WHERE date = %s AND consecutive_buy_days >= %s
-                    ORDER BY consecutive_buy_days DESC, (COALESCE(agency_net_buy,0)
-                            + COALESCE(foreign_net_buy,0)) DESC
-                    """,
-                    (d, min_consecutive),
-                )
+                cur.execute(sql, params)
                 rows = [
                     {
                         "ticker": r[0],
@@ -73,34 +89,47 @@ class SignalQueryTool(VibeBaseTool):
 
 
 class NewsQueryInput(BaseModel):
-    target_date: str = Field(description="조회 기준일 (YYYY-MM-DD)")
+    date_from: str = Field(description="조회 시작일 (YYYY-MM-DD, 포함)")
+    date_to: str = Field(description="조회 종료일 (YYYY-MM-DD, 포함)")
     tickers: list[str] = Field(description="조회 대상 종목코드 목록")
 
 
 class NewsQueryTool(VibeBaseTool):
     name: str = "news_query"
     description: str = (
-        "지정 종목 목록의 당일 뉴스 헤드라인을 조회한다. "
-        "감성 분석을 위한 입력으로 사용."
+        "지정 종목 목록의 [date_from, date_to] 범위 뉴스 헤드라인을 조회한다. "
+        "휴장일이 끼어 있어도 직전 거래일~다음 거래일 사이 뉴스를 모두 확인할 수 있도록 범위 쿼리. "
+        "각 항목에 date 필드가 포함되어 시점 구분이 가능하다."
     )
     args_schema: type[BaseModel] = NewsQueryInput
 
-    def _run(self, target_date: str, tickers: list[str]) -> str:
+    def _run(self, date_from: str, date_to: str, tickers: list[str]) -> str:
         try:
-            d = date_type.fromisoformat(target_date)
+            d_from = date_type.fromisoformat(date_from)
+            d_to = date_type.fromisoformat(date_to)
+            if d_to < d_from:
+                d_from, d_to = d_to, d_from
             if not tickers:
                 return self.ok(json.dumps({"count": 0, "items": []}))
             with get_pool().connection() as conn, conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT ticker, title, url
+                    SELECT ticker, date, title, url
                     FROM news
-                    WHERE date = %s AND ticker = ANY(%s)
-                    ORDER BY ticker, collected_at DESC
+                    WHERE date BETWEEN %s AND %s AND ticker = ANY(%s)
+                    ORDER BY ticker, date DESC, collected_at DESC
                     """,
-                    (d, tickers),
+                    (d_from, d_to, tickers),
                 )
-                rows = [{"ticker": r[0], "title": r[1], "url": r[2]} for r in cur.fetchall()]
+                rows = [
+                    {
+                        "ticker": r[0],
+                        "date": r[1].isoformat(),
+                        "title": r[2],
+                        "url": r[3],
+                    }
+                    for r in cur.fetchall()
+                ]
             return self.ok(json.dumps({"count": len(rows), "items": rows}))
         except Exception as exc:  # noqa: BLE001
             return self.err_unknown(str(exc))
