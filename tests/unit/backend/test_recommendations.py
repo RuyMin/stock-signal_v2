@@ -201,3 +201,47 @@ class TestGetRecommendationByTicker:
         )
         body = resp.json()
         assert body["holding"] is None
+
+    @pytest.mark.asyncio
+    async def test_consecutive_buy_days_split(self, api_client, db_pool):
+        """외인/기관 연속 매수일 분리 계산.
+        가장 최근(5/6)에 외인 +, 기관 -. 그 전 5/4 외인 +, 기관 +. 4/30 외인 +, 기관 +.
+        → 외국인 3일 연속, 기관 0일 (5/6에서 끊김).
+        """
+        from tests.factories import SignalFactory
+        await RecommendationFactory.create(
+            db_pool, date(2026, 5, 4), date(2026, 5, 6),
+            ticker="005930", score=85,
+        )
+        await SignalFactory.create(
+            db_pool, date(2026, 5, 6), "005930",
+            agency_net_buy=-100_000, foreign_net_buy=14_000_000,
+            consecutive_buy_days=3,
+        )
+        await SignalFactory.create(
+            db_pool, date(2026, 5, 4), "005930",
+            agency_net_buy=1_700_000, foreign_net_buy=4_400_000,
+            consecutive_buy_days=2,
+        )
+        await SignalFactory.create(
+            db_pool, date(2026, 4, 30), "005930",
+            agency_net_buy=200_000, foreign_net_buy=1_300_000,
+            consecutive_buy_days=1,
+        )
+
+        resp = await api_client.get("/recommendations/by-ticker/005930")
+        body = resp.json()
+        assert body["foreign_consecutive_buy_days"] == 3
+        assert body["agency_consecutive_buy_days"] == 0  # 5/6에서 음수로 끊김
+
+    @pytest.mark.asyncio
+    async def test_consecutive_buy_days_none_when_no_signals(self, api_client, db_pool):
+        """signals 0건이면 두 값 모두 None."""
+        await RecommendationFactory.create(
+            db_pool, date(2026, 5, 4), date(2026, 5, 6),
+            ticker="005930", score=85,
+        )
+        resp = await api_client.get("/recommendations/by-ticker/005930")
+        body = resp.json()
+        assert body["foreign_consecutive_buy_days"] is None
+        assert body["agency_consecutive_buy_days"] is None

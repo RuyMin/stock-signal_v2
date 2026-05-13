@@ -36,6 +36,22 @@ _TICKER_RE = re.compile(r"^\d{6}$")
 _SIGNAL_LOOKBACK = 7  # signals/평단가 계산에 쓰는 최대 일자 수
 _NEWS_LIMIT = 5
 
+
+def _calc_consec(signals: list[SignalSummary], field: str) -> int:
+    """signals(date desc)의 가장 최근 row부터 `field`가 양수인 연속 일수.
+
+    signals는 매일 30위 안에 들어온 종목만 row가 있어 sparse → row 자체가 없는 날은
+    표본에서 제외(연속에 영향 없음). 단, 가장 최근 row의 값이 0/음수면 즉시 끊김.
+    """
+    count = 0
+    for s in signals:
+        v = getattr(s, field, None) or 0
+        if v > 0:
+            count += 1
+        else:
+            break
+    return count
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -206,6 +222,10 @@ async def get_recommendation_by_ticker(
                     days=days,
                 )
 
+    # 7. 외인/기관 분리 연속 매수일 (signals raw로 즉석 계산)
+    foreign_consec = _calc_consec(signals, "foreign_net_buy") if signals else None
+    agency_consec = _calc_consec(signals, "agency_net_buy") if signals else None
+
     return RecommendationDetailResponse(
         recommendation=RecommendationItem.model_validate(rec),
         signals=signals,
@@ -213,4 +233,6 @@ async def get_recommendation_by_ticker(
         macro=macro,
         holding=holding_info,
         institutional_avg=institutional_avg,
+        foreign_consecutive_buy_days=foreign_consec,
+        agency_consecutive_buy_days=agency_consec,
     )

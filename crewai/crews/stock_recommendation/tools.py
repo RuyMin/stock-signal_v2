@@ -189,6 +189,72 @@ class MacroQueryTool(VibeBaseTool):
 # ─── HoldingsQueryTool (공통 — Synthesizer가 탈출 경보 분류 시 사용) ─
 
 
+# ─── MomentumQueryTool ───────────────────────────────
+
+
+class MomentumQueryInput(BaseModel):
+    target_date: str = Field(description="조회 기준일 (YYYY-MM-DD)")
+    tickers: Optional[list[str]] = Field(
+        default=None,
+        description="지정 시 해당 ticker만 반환 (후보 평가용). 미지정 시 그 날짜의 모든 ticker.",
+    )
+
+
+class MomentumQueryTool(VibeBaseTool):
+    name: str = "momentum_query"
+    description: str = (
+        "특정 거래일의 모멘텀/기술적 지표를 조회한다. 반환 필드:\n"
+        "- one_day_net_buy: 1일 순매수 금액 (원/KRW, 기관+외국인 합계). surge momentum 임계 100억(10000000000).\n"
+        "- three_day_avg_net_buy: 직전 3거래일 평균 순매수 금액 (원). acceleration: one_day >= 2*avg AND avg>0.\n"
+        "- volume_ratio: 당일 거래량/20일 평균 거래량. volume surge 임계 3.0.\n"
+        "- rsi: 14기간 RSI (0~100). <30 과매도, >70 과매수.\n"
+        "- ma_alignment: 'bullish' | 'bearish' | 'neutral' (5/20/60일선 배열).\n"
+        "- bollinger_position: 볼린저밴드 내 위치 (0~1).\n"
+        "- trading_value: 거래대금 (원/KRW). 유동성 페널티 임계 50억(5000000000).\n"
+        "NULL은 데이터 부족 또는 yfinance 실패를 의미 — 점수 계산 시 0점 처리(spec 12.3)."
+    )
+    args_schema: type[BaseModel] = MomentumQueryInput
+
+    def _run(
+        self,
+        target_date: str,
+        tickers: Optional[list[str]] = None,
+    ) -> str:
+        try:
+            d = date_type.fromisoformat(target_date)
+            sql = (
+                "SELECT ticker, one_day_net_buy, three_day_avg_net_buy, "
+                "volume_ratio, rsi, ma_alignment, bollinger_position, trading_value "
+                "FROM signals WHERE date = %s"
+            )
+            params: list = [d]
+            if tickers:
+                sql += " AND ticker = ANY(%s)"
+                params.append(tickers)
+            sql += " ORDER BY COALESCE(one_day_net_buy, 0) DESC"
+            with get_pool().connection() as conn, conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = [
+                    {
+                        "ticker": r[0],
+                        "one_day_net_buy": r[1],
+                        "three_day_avg_net_buy": r[2],
+                        "volume_ratio": float(r[3]) if r[3] is not None else None,
+                        "rsi": float(r[4]) if r[4] is not None else None,
+                        "ma_alignment": r[5],
+                        "bollinger_position": float(r[6]) if r[6] is not None else None,
+                        "trading_value": r[7],
+                    }
+                    for r in cur.fetchall()
+                ]
+            return self.ok(json.dumps({"count": len(rows), "items": rows}))
+        except Exception as exc:  # noqa: BLE001
+            return self.err_unknown(str(exc))
+
+
+# ─── HoldingsQueryTool ────────────────────────────────
+
+
 class HoldingsQueryInput(BaseModel):
     pass
 

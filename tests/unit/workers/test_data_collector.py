@@ -127,10 +127,18 @@ def patch_clients(monkeypatch):
                                   us10y=None, dxy=None, wti=None, sp500=None, gold=None)
         return state["macro"]
 
+    # yfinance 기술적 지표는 단위 테스트에서 외부 호출 없이 비활성화 (None 반환).
+    # one_day_net_buy 등 momentum 검증이 필요한 테스트는 state["tech_map"] 채우기.
+    state["tech_map"] = {}
+
+    async def _fake_fetch_ti(ticker: str, target_date):
+        return state["tech_map"].get(ticker)
+
     import processor as proc_module
     monkeypatch.setattr(proc_module, "KisApiClient", _make_kis)
     monkeypatch.setattr(proc_module, "NaverNewsScraper", _make_naver)
     monkeypatch.setattr(proc_module, "fetch_macro_snapshot", _fake_macro)
+    monkeypatch.setattr(proc_module, "fetch_technical_indicators", _fake_fetch_ti)
     return state
 
 

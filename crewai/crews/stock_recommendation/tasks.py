@@ -8,38 +8,48 @@ from core.base_task import BaseTask
 
 class SignalAnalysisTask(BaseTask):
     description = (
-        "거래일 {target_date}의 한국 시장 수급 데이터를 분석하라.\n\n"
+        "거래일 {target_date}의 한국 시장 수급 + 모멘텀 데이터를 분석하라.\n\n"
         "절차 (반드시 순서대로 모든 Tool 호출 수행):\n\n"
         "**1단계 — 보유 종목 식별 (먼저 수행)**:\n"
         "  1.1. holdings_query() 호출. 결과 ticker 목록을 H로 정의 (Holdings Set).\n\n"
-        "**2단계 — 신규 매수 후보 도출 (보유 종목과 분리)**:\n"
-        "  2.1. signal_query(target_date={target_date}, min_consecutive=3): PRD 기본 룰 (3일 연속 매수). "
-        "결과에서 H에 속하지 않은 ticker만 추려 신규 후보 N으로 정의.\n"
-        "  2.2. **|N| < 5이면 보강**: signal_query(target_date={target_date}, min_consecutive=1) 호출. "
-        "결과 중 H에 속하지 않은 ticker를 (agency_net_buy + foreign_net_buy) 합 내림차순으로 정렬해 "
-        "상위 (5 - |N|)개를 N에 추가.\n"
-        "  → N은 **반드시 보유 종목과 겹치지 않는 신규 후보 리스트**. 운영 초기 시그널 sparse 시기에도 "
-        "신규 추천이 작동하도록 2.2 보강 단계는 누락 금지.\n\n"
-        "**3단계 — 보유 종목 수급 강도 평가**:\n"
-        "  3.1. signal_query(target_date={target_date}, min_consecutive=0, tickers=H): "
-        "보유 종목 각각의 실제 net_buy/consecutive 데이터 수집.\n\n"
+        "**2단계 — 신규 매수 후보 도출 (세 경로 OR 결합, 보유 종목 제외)**:\n"
+        "  2.1. signal_query(target_date={target_date}, min_consecutive=3): "
+        "**경로 A — 연속 매수**. 결과에서 H에 속하지 않은 ticker를 C₁로.\n"
+        "  2.2. momentum_query(target_date={target_date}): "
+        "그날 모든 종목의 모멘텀 지표. 결과에서 H에 속하지 않은 ticker 중\n"
+        "    - **경로 B — 급등 모멘텀**: one_day_net_buy ≥ 10,000,000,000 (100억원)\n"
+        "    - **경로 C — 거래량 급증**: volume_ratio ≥ 3.0 AND one_day_net_buy > 0\n"
+        "    두 조건 만족하는 ticker를 C₂로.\n"
+        "  2.3. N = C₁ ∪ C₂ (중복 제거). **이게 신규 후보 풀**.\n"
+        "  2.4. **|N| < 5이면 보강**: signal_query(target_date={target_date}, min_consecutive=1) 호출. "
+        "결과 중 H ∪ N에 속하지 않은 ticker를 (agency_net_buy + foreign_net_buy) 합 내림차순으로 정렬해 "
+        "상위 (5 - |N|)개를 N에 추가. 운영 초기 sparse 시기에도 신규 추천이 작동하도록 누락 금지.\n\n"
+        "**3단계 — 보유 종목 수급/모멘텀 강도 평가**:\n"
+        "  3.1. signal_query(target_date={target_date}, min_consecutive=0, tickers=H).\n"
+        "  3.2. momentum_query는 2.2에서 이미 받았으니 같은 결과에서 H에 해당하는 row를 사용 (Tool 재호출 불필요).\n\n"
         "**최종 출력 구성**:\n"
         "- tickers = N ∪ H (신규 후보 + 보유 종목, 중복 없음)\n"
-        "- new_candidates = N (보유 종목 제외, 시장 추천 대상 — 매수 헬지/관망 후보)\n"
-        "- analysis: 각 ticker별 수급 한 줄 요약 (정량 데이터 포함)\n\n"
-        "**수급 평가 정량 기준** (3.1 결과 또는 2단계 결과로 판단):\n"
+        "- new_candidates = N (보유 종목 제외)\n"
+        "- analysis: 각 ticker별 수급+모멘텀 한 줄 요약 (정량 데이터 포함)\n\n"
+        "**수급/모멘텀 평가 정량 기준**:\n"
         "- agency_net_buy + foreign_net_buy ≥ +1,000,000주 AND consecutive ≥ 2 → '강한 매수 흡수형'.\n"
-        "- net_buy 합 양수 + consecutive=1 → '단발성 매수' (합이 매우 크면 신규 후보로 의미 있음).\n"
+        "- one_day_net_buy ≥ 100억 → '급등 모멘텀'.\n"
+        "- one_day_net_buy ≥ 2 × three_day_avg_net_buy AND three_day_avg_net_buy > 0 → '가속 패턴'.\n"
+        "- volume_ratio ≥ 3.0 → '거래량 급증'.\n"
+        "- net_buy 합 양수 + consecutive=1 → '단발성 매수'.\n"
         "- net_buy 합 음수 → '매도 우세'.\n"
         "- 데이터 row 없음 → '데이터 없음' ('약세' 단정 금지).\n\n"
+        "**단위 주의**:\n"
+        "- one_day_net_buy, three_day_avg_net_buy, trading_value의 단위는 **원(KRW)** — 100억=10,000,000,000.\n"
+        "- agency_net_buy, foreign_net_buy의 단위는 **주식 수** (signal_query 결과).\n\n"
         "**금지 사항**:\n"
         "- new_candidates에 보유 종목(H의 원소)을 절대 넣지 말 것.\n"
-        "- consecutive만 보고 강세/약세 단정 금지 — 실제 net_buy 부호/규모 우선.\n\n"
+        "- consecutive만 보고 강세/약세 단정 금지 — net_buy 부호/규모 + 모멘텀 컨텍스트 동시 고려.\n\n"
         "출력 JSON: {tickers: [...], new_candidates: [...], analysis: {ticker: '한 줄 요약', ...}}"
     )
     expected_output = (
-        "JSON: tickers(신규+보유 합집합) + new_candidates(보유 제외 신규만) + "
-        "ticker별 수급 요약. new_candidates가 보유 종목과 겹치면 즉시 재정렬."
+        "JSON: tickers(신규+보유 합집합) + new_candidates(보유 제외 신규만, 연속/급등/거래량 급증 OR 결합) + "
+        "ticker별 수급+모멘텀 요약(**한국어**). new_candidates가 보유 종목과 겹치면 즉시 재정렬."
     )
 
 
@@ -66,6 +76,7 @@ class NewsAnalysisTask(BaseTask):
     )
     expected_output = (
         "JSON: 종목별 {sentiment, summary, key_dates}. "
+        "summary는 **한국어 한 줄**. "
         "key_dates는 평가에 결정적이었던 뉴스의 발생일. 모든 후보 종목이 키로 포함."
     )
 
@@ -88,31 +99,56 @@ class MacroAnalysisTask(BaseTask):
         "verdict: 'favorable'|'neutral'|'unfavorable'|'unknown', summary: '한 줄 코멘트'}"
     )
     expected_output = (
-        "JSON: 매크로 5지표 값 + verdict + 한 줄 코멘트. "
+        "JSON: 매크로 5지표 값 + verdict + **한국어 한 줄** 코멘트. "
         "데이터 없으면 verdict='unknown'으로 명시 (단정적 'unfavorable' 금지)."
     )
 
 
 class SynthesisTask(BaseTask):
     description = (
-        "수급·뉴스·매크로 분석 결과(이전 Task의 context)를 종합하여 추천 종목을 결정하라.\n\n"
+        "수급·모멘텀·뉴스·매크로·기술적 지표 분석 결과(이전 Task의 context)를 종합하여 "
+        "추천 종목을 결정하라.\n\n"
         "**입력 분리**: SignalAnalysisTask 출력의 `new_candidates`(신규 후보 N) 와 그 외 tickers - N(보유 H)을 "
         "구분해 처리한다.\n\n"
-        "**점수 산출** (각 종목 0~100):\n"
-        "  - 수급 50%: net_buy 부호/규모, consecutive 가중. 양수 + 강도 큰 → 가점.\n"
-        "  - 뉴스 25%: 긍정 +가점 / 부정 -감점 / 없음 중립.\n"
-        "  - 매크로 25%: favorable +가점 / unfavorable -감점 / unknown 중립.\n\n"
-        "**분류 룰** (이건 코드가 후처리로 강제 재분류하지만 prompt에서도 동일 룰을 따라 점수를 합리적으로 매겨라):\n"
+        "**점수 산출** (각 종목 0~100, 4개 컴포넌트 합):\n\n"
+        "**(1) 수급 컴포넌트 0~40 = consecutive 0~20 + momentum 0~20**\n"
+        "  - consecutive (0~20):\n"
+        "    · consecutive_buy_days ≥ 5 → 20점 / 4 → 16 / 3 → 12 / 2 → 8 / 1 → 4 / 0 → 0\n"
+        "    · 단, net_buy 합(agency+foreign 주식 수)이 음수면 강제 0점 (매도 우세)\n"
+        "  - momentum (0~20, **세 점수 중 최댓값**, 상한 20):\n"
+        "    · surge: one_day_net_buy ≥ 10,000,000,000원 → 15점\n"
+        "    · acceleration: one_day_net_buy ≥ 2 × three_day_avg_net_buy AND three_day_avg_net_buy > 0 → 12점\n"
+        "    · volume_surge: volume_ratio ≥ 3.0 → 10점\n"
+        "    · 셋 다 false 또는 데이터 NULL → 0점\n\n"
+        "**(2) 뉴스 컴포넌트 0~30**\n"
+        "  - 강한 긍정 → 25~30 / 약한 긍정 → 18~24 / 중립 또는 뉴스 없음 → 15\n"
+        "  - 약한 부정 → 8~14 / 강한 부정 → 0~7\n\n"
+        "**(3) 매크로 컴포넌트 0~20**\n"
+        "  - favorable → 17~20 / neutral → 10 / unknown → 10(중립 처리) / unfavorable → 0~5\n\n"
+        "**(4) 기술적 컴포넌트 0~10 (네 점수 합산 후 페널티 차감, [0,10]로 캡)**\n"
+        "  - RSI 점수 (0~8): rsi < 30 → 8 / 30~70 → 5 / > 70 → 2 / NULL → 0\n"
+        "  - MA 점수 (0~3): bullish → 3 / neutral → 1 / bearish → 0 / NULL → 0\n"
+        "  - 볼린저 점수 (0~2): bollinger_position < 0.2 → 2 / 0.3~0.7 → 1 / > 0.8 → 0 / NULL → 0\n"
+        "  - 거래대금 점수 (0~1): trading_value ≥ 10,000,000,000원 → 1 / 그 외 또는 NULL → 0\n"
+        "  - **유동성 페널티**: trading_value < 5,000,000,000원 → -5점\n"
+        "  - 최종 = min(10, max(0, RSI + MA + BB + 거래대금 - 페널티))\n\n"
+        "**최종 점수** = (1) + (2) + (3) + (4), 정수 반올림, [0, 100] 범위.\n\n"
+        "**단위 주의**:\n"
+        "- one_day_net_buy / three_day_avg_net_buy / trading_value의 단위는 **원(KRW)**. "
+        "100억 = 10,000,000,000, 50억 = 5,000,000,000.\n"
+        "- agency_net_buy / foreign_net_buy의 단위는 **주식 수**.\n\n"
+        "**분류 룰** (코드가 후처리로 강제 재분류하지만 prompt에서도 동일 룰로 점수를 매겨라):\n"
         "  - score ≥ 70 → buy_hedge\n"
         "  - 50 ≤ score < 70 → watch\n"
         "  - score < 50 AND 보유 종목(H) → exit_alert\n"
         "  - score < 50 AND 신규 후보(N) → 출력하지 말 것 (시장 추천 가치 없음)\n\n"
         "**출력 한도** (보유와 신규 분리):\n"
-        "  - 보유 종목 H: **5개 모두 출력** (점수에 따라 자동 분류). 한도 없음.\n"
+        "  - 보유 종목 H: **모두 출력** (점수에 따라 자동 분류). 한도 없음.\n"
         "  - 신규 후보 N: **score 상위 3개까지만 출력** (score≥50인 종목 중). score<50은 제외.\n\n"
         "**탈출 시그널 가이드** (보유 종목 한정):\n"
-        "수급 매도 우세 + 뉴스 부정 + 매크로 비우호 중 2개 이상 강하게 발생한 보유 종목은 **score를 50 미만으로 매겨** "
-        "exit_alert로 분류되도록 한다 (코드가 score 기반 강제 분류).\n\n"
+        "수급 매도 우세 + 뉴스 부정 + 매크로 비우호 중 2개 이상 강하게 발생한 보유 종목은 "
+        "**score를 50 미만으로 매겨** exit_alert로 분류되도록 한다. "
+        "또한 trading_value < 50억(유동성 페널티)이 동시에 걸리면 보유 종목 탈출 신호로 더 강하게 해석.\n\n"
         "거래일: {target_date}, 다음 거래일: {target_trading_date}.\n"
         "{holiday_gap_text}\n\n"
         "휴장일 갭 처리 가이드:\n"
@@ -120,19 +156,25 @@ class SynthesisTask(BaseTask):
         "**부정 뉴스 흡수**로 해석하고 수급 점수를 깎지 말 것.\n"
         "- 갭 동안 발생한 글로벌 호재(미국 반도체 랠리, S&P 사상 최고치 등)는 다음 거래일 "
         "한국 시장에 직접 반영되므로 뉴스 점수에 가중.\n\n"
+        "**하위 호환성 (Requirement 12.3)**: momentum/기술적 컬럼이 모두 NULL인 종목(yfinance 실패 등)도 "
+        "기존 (1)consecutive·(2)뉴스·(3)매크로 컴포넌트만으로 점수 산출하여 추천 대상에 포함. "
+        "NULL 값은 해당 컴포넌트에서 0점 처리할 뿐, 종목 자체를 제외하지 말 것.\n\n"
         "최종 출력은 **JSON 배열**만 반환. 다른 텍스트 금지. 각 항목 스키마:\n"
         "{\n"
         '  "ticker": "005930",\n'
         '  "name": null,\n'
         '  "recommendation_type": "buy_hedge"|"watch"|"exit_alert",\n'
         '  "score": 0-100 정수,\n'
-        '  "reason_supply": "한 줄",\n'
-        '  "reason_news": "한 줄 또는 null",\n'
-        '  "reason_macro": "한 줄",\n'
+        '  "reason_supply": "한국어 한 줄 (수급+모멘텀 통합 설명)",\n'
+        '  "reason_news": "한국어 한 줄 또는 null",\n'
+        '  "reason_macro": "한국어 한 줄",\n'
         '  "estimated_avg_price": 숫자|null  (buy_hedge일 때만)\n'
-        "}"
+        "}\n\n"
+        "**언어 강제: 모든 reason 필드는 반드시 한국어로 작성. 영어/번역체 금지.** "
+        "사용자가 한국어 텔레그램 알림으로 받기 때문에 영어 출력은 사용자 경험을 해친다."
     )
     expected_output = (
-        "JSON 배열. 5종목 이내(탈출 경보 제외) + 보유 종목 탈출 경보 전부. "
-        "조건 충족 종목 0개면 빈 배열 [] 반환."
+        "JSON 배열. 신규 후보는 score 상위 3개 (≥50) + 보유 종목 전체. "
+        "조건 충족 종목 0개면 빈 배열 [] 반환. **모든 reason 필드는 한국어.** "
+        "score는 (수급 0~40)+(뉴스 0~30)+(매크로 0~20)+(기술적 0~10) 합산 정수."
     )

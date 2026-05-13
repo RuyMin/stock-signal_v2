@@ -42,9 +42,15 @@ class _FakeUser:
 
 
 @dataclass
+class _FakeMessage:
+    text: str | None = None
+
+
+@dataclass
 class _FakeUpdate:
     effective_chat: _FakeChat | None
     effective_user: _FakeUser | None = None
+    effective_message: _FakeMessage | None = None
 
 
 class _FakeBot:
@@ -154,10 +160,15 @@ class FakeBackend:
 # ─── Helpers ───────────────────────────────────────────────────────
 
 
-def _make_update(chat_id: int = ACTIVE_CHAT_ID, username: str | None = None) -> _FakeUpdate:
+def _make_update(
+    chat_id: int = ACTIVE_CHAT_ID,
+    username: str | None = None,
+    text: str | None = None,
+) -> _FakeUpdate:
     return _FakeUpdate(
         effective_chat=_FakeChat(id=chat_id),
         effective_user=_FakeUser(username=username),
+        effective_message=_FakeMessage(text=text),
     )
 
 
@@ -512,6 +523,8 @@ class TestActiveUserCommands:
             },
             "holding": {"avg_price": "75000.00", "name": "삼성전자보통주"},
             "institutional_avg": {"avg_price": "67500.00", "days": 2},
+            "foreign_consecutive_buy_days": 3,
+            "agency_consecutive_buy_days": 1,
         })
         await reason(update, _make_context(backend, args=["005930"]))
         # chat_id 전달됐는지
@@ -524,7 +537,8 @@ class TestActiveUserCommands:
         assert "🟢" in text and "매수 헬지" in text and "100" in text
         # 시그널 raw
         assert "+4,459,000주" in text and "+1,756,000주" in text
-        assert "연속 매수일:" in text and "2일" in text
+        # 외인/기관 연속 매수일 분리 표시
+        assert "외국인 3일" in text and "기관 1일" in text
         # 추정 평단가
         assert "외+기관 추정 평단가" in text and "67,500" in text
         # 뉴스 헤드라인
@@ -606,6 +620,61 @@ class TestAdminApprove:
         backend.approve_response = (403, {"error_code": "FORBIDDEN"})
         await approve(update, _make_context(backend, args=[str(PENDING_CHAT_ID)]))
         assert any("admin 권한이 없습니다" in t for t in update.effective_chat.sent)
+
+
+class TestAnnounce:
+    @pytest.mark.asyncio
+    async def test_admin_announce_fanout(self):
+        """admin이 /announce → 자기 제외 active 사용자 전원에 공지 송신."""
+        from handlers import announce
+        update = _make_update(ADMIN_CHAT_ID, text="/announce 5/9 정기 점검 안내")
+        backend = FakeBackend()
+        ctx = _make_context(backend)
+        await announce(update, ctx)
+
+        # admin(ADMIN_CHAT_ID) 제외 + ACTIVE_CHAT_ID active만 (PENDING은 active 아님)
+        sent_chats = [s[0] for s in ctx.bot.sent]
+        assert ACTIVE_CHAT_ID in sent_chats
+        assert ADMIN_CHAT_ID not in sent_chats  # 본인 제외
+        assert PENDING_CHAT_ID not in sent_chats  # active 아님
+        # 본문 + 헤더 포함
+        assert "📢 공지" in ctx.bot.sent[0][1]
+        assert "5/9 정기 점검 안내" in ctx.bot.sent[0][1]
+        # admin에게 결과 요약
+        assert any("공지 송신 완료" in t for t in update.effective_chat.sent)
+
+    @pytest.mark.asyncio
+    async def test_non_admin_denied(self):
+        """일반 active 사용자가 /announce → 권한 거부 + bot 호출 없음."""
+        from handlers import announce
+        update = _make_update(ACTIVE_CHAT_ID, text="/announce hi")
+        backend = FakeBackend()
+        ctx = _make_context(backend)
+        await announce(update, ctx)
+        assert any("admin 권한이 필요합니다" in t for t in update.effective_chat.sent)
+        assert ctx.bot.sent == []
+
+    @pytest.mark.asyncio
+    async def test_empty_message_usage_help(self):
+        """/announce (메시지 없음) → 사용법 안내."""
+        from handlers import announce
+        update = _make_update(ADMIN_CHAT_ID, text="/announce   ")
+        backend = FakeBackend()
+        ctx = _make_context(backend)
+        await announce(update, ctx)
+        assert any("사용법" in t for t in update.effective_chat.sent)
+        assert ctx.bot.sent == []
+
+    @pytest.mark.asyncio
+    async def test_send_failure_isolated(self):
+        """일부 사용자 송신 실패 → 격리 + summary에 실패 카운트."""
+        from handlers import announce
+        update = _make_update(ADMIN_CHAT_ID, text="/announce 테스트")
+        backend = FakeBackend()
+        ctx = _make_context(backend)
+        ctx.bot.fail_chat_ids = {ACTIVE_CHAT_ID}
+        await announce(update, ctx)
+        assert any("실패 1명" in t for t in update.effective_chat.sent)
 
 
 # ─── 에러 케이스 ───────────────────────────────────────────────────

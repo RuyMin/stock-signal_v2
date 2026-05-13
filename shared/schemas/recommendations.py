@@ -114,6 +114,9 @@ class RecommendationDetailResponse(BaseModel):
 
     가장 최근 추천 + 그 사이클의 raw 데이터(시그널/뉴스/매크로) + 사용자 보유 정보 + 추정 평단가.
     chat_id 미지정 시 holding은 None.
+
+    `signals.consecutive_buy_days`는 PRD §18에 따라 '기관 OR 외국인 합산' 기준이라 표시상 모호하므로,
+    signals raw에서 외인/기관 각자 가장 최근부터의 연속 양수 매수 일수를 별도로 계산한다.
     """
 
     recommendation: RecommendationItem
@@ -122,3 +125,5 @@ class RecommendationDetailResponse(BaseModel):
     macro: Optional[MacroSummary] = None
     holding: Optional[HoldingInfo] = None
     institutional_avg: Optional[InstitutionalAvgEstimate] = None
+    foreign_consecutive_buy_days: Optional[int] = None
+    agency_consecutive_buy_days: Optional[int] = None

@@ -16,13 +16,14 @@
   /recent 2026-04-25           — 특정 날짜 추천
   /reason 005930               — 해당 종목의 최근 추천 판단 자세히 보기
   /approve <chat_id>           — admin이 pending 사용자 승인
+  /announce <메시지>           — admin이 active 사용자 전원에게 공지 송신
 
 인가 정책:
 - 봇 자체는 누구나 메시지 송신 가능
 - /start만은 누구나 가능 (등록 요청)
 - 그 외 명령어는 backend `/users/by-chat-id`로 status='active'인 사용자만 처리
 - pending/inactive/미등록은 등록 안내 메시지만 응답
-- /approve는 is_admin=true인 사용자만 처리
+- /approve, /announce는 is_admin=true인 사용자만 처리
 """
 import os
 import re
@@ -75,7 +76,8 @@ HELP_TEXT = (
     "/recent 2026-04-25           — 특정 날짜 추천\n"
     "/reason 005930               — 해당 종목 최근 판단 자세히\n"
     "/help                        — 이 메시지\n\n"
-    "(admin) /approve <chat_id> — 신규 사용자 승인"
+    "(admin) /approve <chat_id> — 신규 사용자 승인\n"
+    "(admin) /announce <메시지> — active 사용자 전원에게 공지"
 )
 
 
@@ -131,6 +133,8 @@ def _format_reason_message(detail: dict) -> str:
     # ─── 📊 수급 ────────────────────────────────────────────
     signals = detail.get("signals") or []
     inst_avg = detail.get("institutional_avg")
+    foreign_consec = detail.get("foreign_consecutive_buy_days")
+    agency_consec = detail.get("agency_consecutive_buy_days")
     if signals or rec.get("reason_supply"):
         lines.append("")
         lines.append("📊 수급")
@@ -142,8 +146,11 @@ def _format_reason_message(detail: dict) -> str:
                 lines.append(f"    외국인 순매수: {_fmt_int_with_sign(latest['foreign_net_buy'])}주")
             if latest.get("agency_net_buy") is not None:
                 lines.append(f"    기관 순매수:   {_fmt_int_with_sign(latest['agency_net_buy'])}주")
-            if latest.get("consecutive_buy_days") is not None:
-                lines.append(f"    연속 매수일:   {latest['consecutive_buy_days']}일")
+        # 분리된 연속 매수일 (외인/기관 별도)
+        if foreign_consec is not None or agency_consec is not None:
+            f_part = f"외국인 {foreign_consec or 0}일"
+            a_part = f"기관 {agency_consec or 0}일"
+            lines.append(f"    연속 매수일:   {f_part} / {a_part}")
         if inst_avg:
             avg_str = _fmt_price(inst_avg.get("avg_price"))
             d = inst_avg.get("days", 0)
@@ -659,6 +666,63 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await _reply(update, f"❌ 오류: {body.get('message', '알 수 없는 오류')}")
     logger.info("command_processed", command="/approve", chat_id=chat_id, target=target, status=status)
+
+
+async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/announce <메시지> — admin 전용. active 사용자(본인 제외) 전원에게 공지 송신."""
+    client: BackendClient = context.bot_data["backend"]
+    user = await _resolve_active_user(update, client)
+    if user is None:
+        return
+    chat_id = user["chat_id"]
+    if not user.get("is_admin"):
+        await _reply(update, "⛔ admin 권한이 필요합니다")
+        logger.warning("announce_denied_non_admin", chat_id=chat_id)
+        return
+
+    # 메시지 본문은 텔레그램 raw text에서 직접 추출 (멀티라인/공백 보존).
+    raw_text = (update.effective_message.text or "") if update.effective_message else ""
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await _reply(update, "❌ 사용법: /announce <메시지>")
+        return
+    body = parts[1].strip()
+    logger.info("command_received", command="/announce", chat_id=chat_id, length=len(body))
+
+    # active 사용자 목록
+    list_status, list_body = await client.list_users()
+    if list_status != 200:
+        await _reply(update, "⚠️ 사용자 목록 조회 실패 — 잠시 후 다시 시도해주세요")
+        logger.error("announce_list_users_failed", status=list_status)
+        return
+
+    targets = [
+        u for u in (list_body.get("items") or [])
+        if u.get("status") == "active" and u.get("chat_id") != chat_id
+    ]
+    if not targets:
+        await _reply(update, "⚠️ 송신 대상 active 사용자가 없습니다")
+        return
+
+    formatted = f"📢 공지\n\n{body}"
+    bot = context.bot
+    sent: list[int] = []
+    failed: list[int] = []
+    for t in targets:
+        target = t.get("chat_id")
+        try:
+            await bot.send_message(chat_id=target, text=formatted, disable_web_page_preview=True)
+            sent.append(target)
+            logger.info("announce_sent", target_chat_id=target)
+        except Exception as exc:  # noqa: BLE001
+            failed.append(target)
+            logger.error("announce_send_failed", target_chat_id=target, error=str(exc))
+
+    summary = f"✅ 공지 송신 완료: {len(sent)}명"
+    if failed:
+        summary += f" / 실패 {len(failed)}명"
+    await _reply(update, summary)
+    logger.info("command_processed", command="/announce", sent=len(sent), failed=len(failed))
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

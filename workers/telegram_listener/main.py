@@ -41,6 +41,7 @@ def main() -> None:
     application.add_handler(CommandHandler("recent", handlers.recent))
     application.add_handler(CommandHandler("reason", handlers.reason))
     application.add_handler(CommandHandler("approve", handlers.approve))
+    application.add_handler(CommandHandler("announce", handlers.announce))
     # 등록되지 않은 명령어 → 알림
     application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown))
 

@@ -74,7 +74,7 @@ services:
       - -c
       - |
         pip install -q --no-cache-dir pytest pytest-asyncio respx freezegun \
-        && python -m pytest tests/unit/workers/test_data_collector.py tests/unit/workers/test_data_collector_main.py tests/unit/workers/test_kis_api.py tests/unit/workers/test_naver_scraper.py -v --tb=short --strict-markers
+        && python -m pytest tests/unit/workers/test_data_collector.py tests/unit/workers/test_data_collector_main.py tests/unit/workers/test_kis_api.py tests/unit/workers/test_naver_scraper.py tests/unit/workers/test_yfinance_technical_indicators.py -v --tb=short --strict-markers
 
   telegram-notifier-tests:
     build:

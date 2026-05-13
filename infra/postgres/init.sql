@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS signals (
     foreign_net_buy         BIGINT,
     consecutive_buy_days    INTEGER      NOT NULL DEFAULT 0,
     collected_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- momentum/technical indicators (Alembic 20260108_0001 — momentum-signals spec)
+    one_day_net_buy         BIGINT,
+    three_day_avg_net_buy   BIGINT,
+    volume_ratio            NUMERIC(6,2),
+    rsi                     NUMERIC(5,2),
+    ma_alignment            VARCHAR(20),
+    bollinger_position      NUMERIC(6,3),
+    trading_value           BIGINT,
     UNIQUE(date, ticker)
 );
 

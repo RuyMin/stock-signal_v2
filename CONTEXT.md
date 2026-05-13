@@ -2,7 +2,7 @@
 
 > 이 파일은 Claude의 프로젝트 기억 장치다.
 > 모든 작업 시작 전 반드시 읽고, 작업 완료 후 반드시 업데이트한다.
-> 마지막 업데이트: 2026-05-07 (KIS OAuth 토큰 공유 파일 캐시 — backend/crewai/data-collector가 docker named volume(`kis-token-cache`)으로 token.json 공유. 컨테이너 재시작/멀티 컨테이너 1분 재발급 차단 회피. data-collector 34→37.)
+> 마지막 업데이트: 2026-05-08 (`/announce <메시지>` admin 전용 명령 추가 — active 사용자 전원에 공지 fan-out. listener 33→37. + 추후 작업: 종목 풀 확장(A) + 모멘텀 신호(B) 묶음 — 갑작스런 호재 추격 케이스 대응)
 
 ---
 
@@ -82,7 +82,7 @@
 - [x] `worker-telegram-notifier` — Kafka consumer (stock.recommendation.completed) → PG 조회 → fan-out 송신
   - [x] formatter.py — PRD §13 알림 형식 + 추천 0개 시 "조건 충족 종목 없음"
   - [x] **multi-user fan-out** (2026-04-30): active users 전체 루프 + 사용자별 holdings 매칭. exit_alert는 사용자 보유 종목만 메시지에 포함, 한 사용자 송신 실패는 try/except로 격리해 다른 사용자에 영향 없음.
-- [x] `worker-telegram-listener` — long-polling, 9개 명령어 (`/start /help /add /edit /remove /list /recent /reason /approve`)
+- [x] `worker-telegram-listener` — long-polling, 10개 명령어 (`/start /help /add /edit /remove /list /recent /reason /approve /announce`)
   - [x] **multi-user 인증** (2026-04-30): backend `/users/by-chat-id`로 active 사용자만 명령어 처리. /start는 누구나 가능(register pending), /approve는 admin 전용. `TELEGRAM_AUTHORIZED_CHAT_ID` 단일값 의존 제거.
   - [x] **신규 등록 admin 알림** (2026-05-03): `/start` 응답이 201(신규) + status=pending이면 backend `/users` 조회로 active admin들에게 텔레그램 fan-out 알림. 메시지에 chat_id/username/`/approve` 명령 포함. 송신 실패는 try/except로 격리. ADMIN_BOOTSTRAP_IDS 본인은 자기 등록 시 알림 제외.
   - [x] **/add 평단가 옵션 + /edit 신규 명령** (2026-05-03): `/add 005930 [평단가]` 두 번째 인자 옵션, `/edit 005930 75000` 평단가 갱신, `/edit 005930 -` 평단가 제거. /list 출력에 평단가 표시. clear는 BackendClient.update_holding(clear_avg_price=True)로 avg_price=null 명시 송신.
@@ -384,6 +384,12 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 
 48. **신규 후보 누락 — 운영 1주 모니터링 (2026-05-06)**: 5/6 검증 5차/6차에서 신규 매수 후보가 추천에 포함되지 않음. 5차는 SignalAnalyzer가 신규 후보 정확히 도출했지만 Synthesizer가 5종목 한도에서 누락, 6차는 SignalAnalyzer 자체가 JSON 깨고 영어 마크다운으로 응답해 new_candidates 정보 사라짐. **LLM 비결정성**으로 Task description 강제만으로는 한계. 임시 방침: **운영 1주 자연 누적 후 빈도 결정**. 자주 누락되면 후속 fix는 "후보 풀 결정을 코드로 deterministic하게 (crewai/main.py에서 holdings + signals 조회해 inputs에 명시 주입), LLM은 점수 산정만". 운영 모니터링: 매일 recommendations 테이블에서 보유 종목 외 ticker 비율 확인. 0% 지속이면 코드 fix 진행.
 
+54. **`/announce <메시지>` admin 공지 명령 (2026-05-08)**: admin이 active 사용자(자기 제외) 전원에 공지를 텔레그램 fan-out. handler가 `update.effective_message.text`에서 `/announce` 자체를 제외한 본문을 추출(멀티라인/공백 보존). backend `/users` 조회 → active + chat_id != admin 필터. 메시지 헤더 `📢 공지` 자동 추가. 사용자별 송신 실패는 try/except 격리 + 결과 summary("✅ 공지 송신 완료: N명 / 실패 M명"). 신규 등록 admin 알림 패턴(`_notify_admins_new_registration`)과 동일 fan-out 구조 재사용.
+
+53. **CrewAI LLM 한국어 출력 강제 (2026-05-08)**: 5/8 06:30 KST 자동 알림에서 모든 reason 필드가 영어로 출력된 케이스. Task description / Agent backstory가 한국어인데 출력 언어를 명시하지 않아 GPT-4o-mini가 임의로 영어 선택. **fix**: SynthesisTask description의 출력 JSON 명세에 `"한국어 한 줄"` + 명시적 강제 문구("**언어 강제: 모든 reason 필드는 반드시 한국어로 작성. 영어/번역체 금지**"), Signal/News/Macro Task expected_output에도 한국어 명시, 4개 Agent(Signal/News/Macro/Synthesizer) backstory에 "모든 출력은 한국어로 작성" 추가. LLM 비결정성 추가 방어선 — 다음 trigger부터 적용.
+
+52. **/reason 메시지 수급 분리 표시 (2026-05-07)**: 사용자 피드백 — 기존 `consecutive_buy_days`는 PRD §18에 따라 "기관 OR 외국인 합산" 기준이라 표시상 모호. **fix**: backend by-ticker가 signals raw에서 외인/기관 각자 가장 최근부터의 양수 연속 일수 즉석 계산 (`_calc_consec(signals, "foreign_net_buy" | "agency_net_buy")`) → `foreign_consecutive_buy_days` / `agency_consecutive_buy_days` 별도 필드로 응답. listener 메시지에 "연속 매수일: 외국인 3일 / 기관 2일" 분리 표시. signals 테이블 자체는 그대로(PRD 룰 유지) — 표시 단계에서만 분리. signals 0건이면 두 값 모두 None.
+
 51. **`/reason` 명령 + GET /recommendations/by-ticker/{ticker} (2026-05-07)**: 사용자가 특정 종목의 최근 판단을 자세히 받아볼 수 있도록 신규 텔레그램 명령 + backend Detail 응답 endpoint 추가. **응답 구성** (`RecommendationDetailResponse`): (a) 가장 최근 recommendation 1건, (b) signals 최근 7일치 raw, (c) news rec.date~target_trading_date 최신 5건, (d) macro target_trading_date 이전 가장 최근 1건, (e) holding(chat_id 옵션 query, active 사용자 보유 시), (f) **외+기관 추정 평단가** = `SUM(net_buy_i × close_i) / SUM(net_buy_i)` — signals 양수 매수일 + KIS `inquire-daily-itemchartprice` 종가 가중. `backend/clients/kis_api.py.fetch_daily_prices()` 신설(TR_ID `FHKST03010100`). 데이터 부족(시그널 0건, KIS 응답 빈값 등) 시 평단가는 None으로 자연 생략. listener `_format_reason_message()`가 6개 섹션(헤더/수급/뉴스/매크로/추천 추정 매집가/내 보유)을 데이터 가용성에 따라 자동 표시. 추정값 한계는 메시지에 "추정값" 명시. **부수 fix**: `RecommendationItem.job_id`가 SQLAlchemy `UUID(as_uuid=True)`라 단일 객체 응답 시 pydantic `string_type` 검증 오류 → schema에 `field_validator(mode="before")`로 `uuid.UUID → str` 강제 변환.
 
 50. **crewai on_complete()의 KIS name 보강 (2026-05-07)**: 5/7 알림에서 신규 후보 3개(018880/003530/006800)가 종목명 없이 ticker만 표시된 이슈. LLM(Synthesizer)이 JSON에 name을 NULL로 줘서 `recommendations.name=NULL` + notifier fallback이 holdings에만 의존(신규 후보는 holdings에 없음 → ticker 노출). **fix**: backend의 `clients/kis_api.py`와 같은 sync 패턴으로 `crewai/clients/kis_api.py` 신설 (httpx.Client + 모듈 단위 토큰 캐시). `crew.py on_complete()`가 INSERT 직전 LLM name 미명시 시 KIS 즉시 호출해 채움. 다층 폴백: LLM name > KIS API > NULL(notifier holdings 폴백 시도). crewai requirements는 httpx 명시 제거(crewai 1.14.3이 자동 0.28.x 설치, 0.27.0 핀과 충돌). 5/7 NULL 5건은 one-shot UPDATE로 즉시 보강(005930=삼성전자보통주, 003530=한화투자증권보통주, 006800=미래에셋증권보통주, 018880=한온시스템보통주, 000660=에스케이하이닉스보통주). 단위 테스트 +3 (KIS 채움 / LLM 우선 / 실패 NULL).
@@ -405,6 +411,7 @@ worker-telegram-notifier  consume → SELECT recommendations → 텔레그램 fa
 - [ ] `recommendations` 테이블에 "사후 실제 수익률" 컬럼 추가 여부 — 정확도 검증 목적
 - [ ] `pandas_market_calendars` vs 자체 KRX 휴장일 캘린더 — Backend Engineer 결정
 - [ ] LLM 응답 파싱 실패 시 retry 횟수 / 백오프 정책 — AI Engineer 결정
+- [ ] **종목 풀 확장 (A) + 모멘텀 신호 (B) 묶음 작업** (2026-05-08 결정 보류) — 갑작스런 호재(예: 5/8 현대 관련 상한가) 추격 케이스를 잡기 위한 인프라 확장. **A**: KIS API 다른 endpoint(거래량/거래대금/등락률 상위, 외인 보유 비중 등)로 후보 풀을 50~100개로 확대. **B**: signals 테이블에 등락률 컬럼 + 전일 거래량/등락률 급등 종목을 별도 후보 풀로 도입. 현 시스템(수급 추종 컨셉, KIS 30위 제한)이 잡지 못하는 사각지대가 명백 — 운영 1~2주 더 보고 ROI 판단 후 진행.
 
 ### 후속 Architect 작업
 - [x] `API_CONTRACT_SKILL.md` 표준 에러 코드 목록에 `HOLDING_NOT_FOUND` 추가 (2026-04-26)
