@@ -362,16 +362,29 @@ async def _scrape_news(
 
 
 async def _fill_holding_names(pool: asyncpg.Pool, kis: KisApiClient) -> None:
+    """holdings.name IS NULL인 row에 KIS 종목명 채우고, 그 시점에 instrument_type 자동 추론.
+
+    instrument_type은 등록 시 추론되지만 그때 name이 비어있던 행은 단일주 fallback.
+    여기서 name이 채워지면 ETF 패턴 매칭으로 재평가 → 일일 사이클 ETF 제외에 즉시 반영.
+    """
+    from schemas.holdings import infer_instrument_type  # type: ignore[import-not-found]
+
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT ticker FROM holdings WHERE name IS NULL")
         for r in rows:
             ticker = r["ticker"]
             name = await kis.fetch_ticker_name(ticker)
             if name:
+                inferred = infer_instrument_type(name)
                 await conn.execute(
-                    "UPDATE holdings SET name = $1 WHERE ticker = $2", name, ticker
+                    "UPDATE holdings SET name = $1, instrument_type = $2 "
+                    "WHERE ticker = $3 AND instrument_type = 'single_stock'",
+                    name, inferred, ticker,
                 )
-                logger.info("holding_name_filled", ticker=ticker, name=name)
+                logger.info(
+                    "holding_name_filled",
+                    ticker=ticker, name=name, instrument_type=inferred,
+                )
 
 
 def _next_business_day(d: date) -> date:

@@ -29,6 +29,7 @@ from schemas.holdings import (  # type: ignore[import-not-found]
     HoldingListResponse,
     HoldingResponse,
     HoldingUpdateRequest,
+    infer_instrument_type,
 )
 
 logger = structlog.get_logger()
@@ -82,11 +83,15 @@ async def add_holding(
     if resolved_name is None:
         resolved_name = await kis_api.fetch_ticker_name(payload.ticker)
 
+    # instrument_type 자동 추론. name이 None이면 'single_stock' (worker가 name 채울 때 재평가).
+    inst_type = infer_instrument_type(resolved_name)
+
     holding = Holding(
         user_id=user.id,
         ticker=payload.ticker,
         name=resolved_name,
         avg_price=payload.avg_price,
+        instrument_type=inst_type,
     )
     db.add(holding)
     try:
@@ -108,6 +113,7 @@ async def add_holding(
         user_id=user.id,
         chat_id=user.chat_id,
         avg_price=str(holding.avg_price) if holding.avg_price is not None else None,
+        instrument_type=holding.instrument_type,
     )
     return HoldingResponse.model_validate(holding)
 

@@ -49,16 +49,21 @@ CREATE INDEX IF NOT EXISTS idx_users_status ON users(status) WHERE status = 'act
 -- ─── 도메인: 보유 종목 (사용자별) ───────────────────────
 
 CREATE TABLE IF NOT EXISTS holdings (
-    id          SERIAL PRIMARY KEY,
-    user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    ticker      VARCHAR(10) NOT NULL,
-    name        VARCHAR(100),
-    avg_price   NUMERIC(12,2),
-    added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id              SERIAL PRIMARY KEY,
+    user_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ticker          VARCHAR(10)  NOT NULL,
+    name            VARCHAR(100),
+    avg_price       NUMERIC(12,2),
+    added_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- etf-and-weekly-macro spec: 'single_stock' | 'index_etf' | 'sector_etf'
+    instrument_type VARCHAR(20)  NOT NULL DEFAULT 'single_stock',
     UNIQUE(user_id, ticker)
 );
 
 CREATE INDEX IF NOT EXISTS idx_holdings_user_id ON holdings(user_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_instrument_type
+    ON holdings(instrument_type)
+    WHERE instrument_type != 'single_stock';
 
 -- ─── 도메인: 수급 시계열 ───────────────────────────────
 

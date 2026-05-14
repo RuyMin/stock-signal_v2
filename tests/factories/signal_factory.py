@@ -11,21 +11,39 @@ class SignalFactory:
         consecutive_buy_days: int = 3,
         agency_net_buy: int = 1_000_000_000,
         foreign_net_buy: int = 500_000_000,
+        one_day_net_buy: int | None = None,
+        three_day_avg_net_buy: int | None = None,
+        volume_ratio: float | None = None,
+        rsi: float | None = None,
+        ma_alignment: str | None = None,
+        bollinger_position: float | None = None,
+        trading_value: int | None = None,
     ) -> None:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO signals (
                     date, ticker, agency_buy, agency_sell, agency_net_buy,
-                    foreign_buy, foreign_sell, foreign_net_buy, consecutive_buy_days
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    foreign_buy, foreign_sell, foreign_net_buy, consecutive_buy_days,
+                    one_day_net_buy, three_day_avg_net_buy, volume_ratio,
+                    rsi, ma_alignment, bollinger_position, trading_value
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 ON CONFLICT (date, ticker) DO UPDATE SET
-                    consecutive_buy_days = EXCLUDED.consecutive_buy_days
+                    consecutive_buy_days = EXCLUDED.consecutive_buy_days,
+                    one_day_net_buy = EXCLUDED.one_day_net_buy,
+                    three_day_avg_net_buy = EXCLUDED.three_day_avg_net_buy,
+                    volume_ratio = EXCLUDED.volume_ratio,
+                    rsi = EXCLUDED.rsi,
+                    ma_alignment = EXCLUDED.ma_alignment,
+                    bollinger_position = EXCLUDED.bollinger_position,
+                    trading_value = EXCLUDED.trading_value
                 """,
                 d, ticker,
                 agency_net_buy + 100_000_000, 100_000_000, agency_net_buy,
                 foreign_net_buy + 100_000_000, 100_000_000, foreign_net_buy,
                 consecutive_buy_days,
+                one_day_net_buy, three_day_avg_net_buy, volume_ratio,
+                rsi, ma_alignment, bollinger_position, trading_value,
             )
 
     @staticmethod

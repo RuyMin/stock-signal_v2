@@ -21,6 +21,7 @@ from .agents import (
     SignalAnalyzerAgent,
     SynthesizerAgent,
 )
+from .scoring import total_score
 from .tasks import (
     MacroAnalysisTask,
     NewsAnalysisTask,
@@ -55,9 +56,12 @@ class StockRecommendationCrew(BaseCrew):
         return [signal_task, news_task, macro_task, synth_task]
 
     def on_complete(self, raw_result: Any, inputs: dict) -> dict:
-        """Synthesizer 출력(JSON 배열) 파싱 → recommendations INSERT.
+        """Synthesizer 출력(JSON 배열) 파싱 → 코드로 score 산정 → recommendations INSERT.
 
-        후처리 강제 (LLM 분류 룰 일탈 방지):
+        점수 산정은 scoring.total_score()가 결정론적으로 계산. LLM은 sentiment +
+        macro_verdict + reason만 작성. score는 LLM 출력에서 무시한다 (있어도 사용 안 함).
+
+        분류 룰:
           - score ≥ 70 → buy_hedge
           - 50 ≤ score < 70 → watch
           - score < 50 AND 보유 → exit_alert
@@ -75,23 +79,30 @@ class StockRecommendationCrew(BaseCrew):
         if items:
             with get_pool().connection() as conn:
                 with conn.cursor() as cur:
-                    # 보유 종목 합집합 조회 (분류 후처리용 — score<50 보유는 exit_alert 강제)
                     cur.execute("SELECT DISTINCT ticker FROM holdings")
                     holdings_set = {r[0] for r in cur.fetchall()}
 
+                    # signals row 일괄 fetch (ticker → row dict)
+                    tickers = [it["ticker"] for it in items]
+                    signal_rows = _fetch_signal_rows(cur, tickers, target_date)
+
                     for it in items:
                         ticker = it["ticker"]
-                        score = int(it["score"])
                         is_holding = ticker in holdings_set
-                        llm_type = it.get("recommendation_type")
+                        sentiment = it.get("sentiment")
+                        macro_verdict = it.get("macro_verdict")
+
+                        # 코드 기반 score 산정 (LLM score는 무시)
+                        score, breakdown = total_score(
+                            signal_rows.get(ticker), sentiment, macro_verdict
+                        )
 
                         # name 보강: LLM 명시 우선 → KIS API 즉시 조회 → NULL fallback
-                        # (notifier가 holdings.name으로 추가 fallback 시도)
                         rec_name = (it.get("name") or "").strip() or None
                         if rec_name is None:
                             rec_name = kis_api.fetch_ticker_name(ticker)
 
-                        # score 기반 type 강제 재분류
+                        # score 기반 분류
                         if score >= 70:
                             rec_type = "buy_hedge"
                         elif score >= 50:
@@ -99,21 +110,11 @@ class StockRecommendationCrew(BaseCrew):
                         elif is_holding:
                             rec_type = "exit_alert"
                         else:
-                            # 신규 후보 score<50 → 시장 추천 가치 없음, 제외
                             logger.info(
                                 "skipped_low_score_new_candidate",
-                                ticker=ticker, score=score,
+                                ticker=ticker, score=score, breakdown=breakdown,
                             )
                             continue
-
-                        # LLM 분류와 강제 재분류 차이 모니터링
-                        if llm_type != rec_type:
-                            logger.info(
-                                "type_reclassified",
-                                ticker=ticker, score=score,
-                                llm_type=llm_type, enforced_type=rec_type,
-                                is_holding=is_holding,
-                            )
 
                         cur.execute(
                             """
@@ -139,7 +140,7 @@ class StockRecommendationCrew(BaseCrew):
                                 it.get("reason_supply"),
                                 it.get("reason_news"),
                                 it.get("reason_macro"),
-                                it.get("estimated_avg_price"),
+                                it.get("estimated_avg_price") if rec_type == "buy_hedge" else None,
                                 self.job_id,
                             ),
                         )
@@ -150,6 +151,9 @@ class StockRecommendationCrew(BaseCrew):
                         logger.info(
                             "recommendation_created",
                             ticker=ticker, type=rec_type, score=score,
+                            breakdown=breakdown, sentiment=sentiment,
+                            macro_verdict=macro_verdict, is_holding=is_holding,
+                            has_signal_row=ticker in signal_rows,
                         )
                 conn.commit()
 
@@ -161,6 +165,37 @@ class StockRecommendationCrew(BaseCrew):
             "has_watch": has_watch,
             "has_exit_alert": has_exit_alert,
         }
+
+
+def _fetch_signal_rows(cur, tickers: list[str], target_date: date_type) -> dict[str, dict]:
+    """signals 테이블에서 ticker별 row를 dict 형태로 반환. row 없는 ticker는 키 없음."""
+    if not tickers:
+        return {}
+    cur.execute(
+        """
+        SELECT ticker, agency_net_buy, foreign_net_buy, consecutive_buy_days,
+               one_day_net_buy, three_day_avg_net_buy, volume_ratio,
+               rsi, ma_alignment, bollinger_position, trading_value
+        FROM signals
+        WHERE date = %s AND ticker = ANY(%s)
+        """,
+        (target_date, tickers),
+    )
+    rows: dict[str, dict] = {}
+    for r in cur.fetchall():
+        rows[r[0]] = {
+            "agency_net_buy": r[1],
+            "foreign_net_buy": r[2],
+            "consecutive_buy_days": r[3],
+            "one_day_net_buy": r[4],
+            "three_day_avg_net_buy": r[5],
+            "volume_ratio": float(r[6]) if r[6] is not None else None,
+            "rsi": float(r[7]) if r[7] is not None else None,
+            "ma_alignment": r[8],
+            "bollinger_position": float(r[9]) if r[9] is not None else None,
+            "trading_value": r[10],
+        }
+    return rows
 
 
 _JSON_BLOCK = re.compile(r"\[.*\]", re.DOTALL)
@@ -194,17 +229,12 @@ def _parse_recommendations(raw: Any) -> list[dict]:
 
 
 def _validate(item: Any) -> dict | None:
+    """LLM JSON 검증 — ticker만 필수. sentiment / macro_verdict / reason은 없으면 None 처리.
+    score / recommendation_type은 코드가 산정하므로 LLM 출력에서 무시.
+    """
     if not isinstance(item, dict):
         return None
-    required = {"ticker", "recommendation_type", "score"}
-    if not required.issubset(item.keys()):
-        return None
-    if item["recommendation_type"] not in {"buy_hedge", "watch", "exit_alert"}:
-        return None
-    try:
-        score = int(item["score"])
-    except (TypeError, ValueError):
-        return None
-    if not 0 <= score <= 100:
+    ticker = item.get("ticker")
+    if not isinstance(ticker, str) or not ticker.strip():
         return None
     return item

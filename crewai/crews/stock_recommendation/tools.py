@@ -262,16 +262,20 @@ class HoldingsQueryInput(BaseModel):
 class HoldingsQueryTool(VibeBaseTool):
     name: str = "holdings_query"
     description: str = (
-        "전체 사용자(소규모 화이트리스트 multi-user)가 등록한 보유 종목의 합집합을 조회. "
-        "탈출 경보(exit_alert) 후보 풀로 사용 — 어느 사용자라도 보유한 종목 중에서만 분류. "
-        "사용자별 메시지 분기(\"보유\" 표기 vs 미보유 종목 제외)는 notifier가 후처리한다."
+        "전체 사용자(소규모 화이트리스트 multi-user)가 등록한 **단일주(single_stock)** "
+        "보유 종목의 합집합을 조회. 지수형 ETF/ETN은 추종 지수의 매크로 환경에 의해 움직이므로 "
+        "별도 주간 매크로 리포트로 평가하며, 이 도구의 일일 사이클 후보 풀에서는 제외된다. "
+        "탈출 경보(exit_alert) 후보 풀로 사용 — 어느 사용자라도 보유한 단일주 중에서만 분류."
     )
     args_schema: type[BaseModel] = HoldingsQueryInput
 
     def _run(self) -> str:  # type: ignore[override]
         try:
             with get_pool().connection() as conn, conn.cursor() as cur:
-                cur.execute("SELECT ticker, name FROM holdings ORDER BY ticker")
+                cur.execute(
+                    "SELECT ticker, name FROM holdings "
+                    "WHERE instrument_type = 'single_stock' ORDER BY ticker"
+                )
                 rows = [{"ticker": r[0], "name": r[1]} for r in cur.fetchall()]
             return self.ok(json.dumps({"count": len(rows), "tickers": [r["ticker"] for r in rows]}))
         except Exception as exc:  # noqa: BLE001

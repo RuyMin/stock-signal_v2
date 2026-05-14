@@ -12,10 +12,12 @@ class HoldingFactory:
         avg_price: Optional[Decimal] = None,
         user_id: Optional[str] = None,
         chat_id: int = 11111111,
+        instrument_type: str = "single_stock",
     ) -> dict:
         """user_id가 None이면 chat_id로 user를 만들거나 찾아서 사용한다.
 
         backward-compat: user_id 지정 안 해도 자동 user 생성으로 동작.
+        instrument_type: 'single_stock' | 'index_etf' | 'sector_etf' (etf-and-weekly-macro spec).
         """
         async with pool.acquire() as conn:
             if user_id is None:
@@ -31,9 +33,9 @@ class HoldingFactory:
                     )
                 user_id = row["id"]
             row = await conn.fetchrow(
-                "INSERT INTO holdings (user_id, ticker, name, avg_price) "
-                "VALUES ($1::uuid, $2, $3, $4) "
-                "RETURNING id, ticker, name, avg_price, added_at, user_id::text",
-                user_id, ticker, name, avg_price,
+                "INSERT INTO holdings (user_id, ticker, name, avg_price, instrument_type) "
+                "VALUES ($1::uuid, $2, $3, $4, $5) "
+                "RETURNING id, ticker, name, avg_price, added_at, user_id::text, instrument_type",
+                user_id, ticker, name, avg_price, instrument_type,
             )
         return dict(row)

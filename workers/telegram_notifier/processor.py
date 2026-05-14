@@ -99,8 +99,12 @@ async def notify(
     for u in users:
         chat_id = str(u["chat_id"])
         async with pool.acquire() as conn:
+            # daily fan-out은 단일주만 매칭 — ETF/ETN 등 지수형은 주간 매크로 리포트에서 평가
+            # (etf-and-weekly-macro spec). crewai HoldingsQueryTool이 이미 걸러도 이중 안전망.
             holdings_rows = await conn.fetch(
-                "SELECT ticker FROM holdings WHERE user_id = $1::uuid", u["id"]
+                "SELECT ticker FROM holdings "
+                "WHERE user_id = $1::uuid AND instrument_type = 'single_stock'",
+                u["id"],
             )
         user_tickers = {h["ticker"] for h in holdings_rows}
 

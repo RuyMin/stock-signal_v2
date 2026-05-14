@@ -47,21 +47,23 @@ class TestParseRecommendations:
     def test_crew_e001_partial_text_with_json_block(self):
         """JSON 코드블록 추출."""
         parse = self._items_a()
-        text = '여기 결과: ```json\n[{"ticker":"005930","recommendation_type":"buy_hedge","score":85}]\n```'
+        text = '여기 결과: ```json\n[{"ticker":"005930","sentiment":"positive","macro_verdict":"favorable"}]\n```'
         items = parse(text)
         assert len(items) == 1
         assert items[0]["ticker"] == "005930"
 
-    def test_validate_filters_invalid_score(self):
+    def test_validate_requires_ticker(self):
+        """score/recommendation_type은 코드가 산정 → ticker만 필수. ticker 누락 시 거부."""
         parse = self._items_a()
-        text = '[{"ticker":"005930","recommendation_type":"buy_hedge","score":150}]'
-        # score 150은 0~100 범위 밖 → 거부
+        text = '[{"sentiment":"positive"}]'
         assert parse(text) == []
 
-    def test_validate_filters_invalid_type(self):
+    def test_validate_accepts_legacy_score_fields(self):
+        """이전 스키마(score/recommendation_type 포함)도 ticker만 있으면 통과 — 필드는 무시됨."""
         parse = self._items_a()
-        text = '[{"ticker":"005930","recommendation_type":"foo","score":80}]'
-        assert parse(text) == []
+        text = '[{"ticker":"005930","recommendation_type":"foo","score":150}]'
+        items = parse(text)
+        assert len(items) == 1  # score/type은 코드가 산정해 덮어씀
 
 
 # ─── on_complete (recommendations INSERT) ─────────────────────────
@@ -86,88 +88,140 @@ async def _seed_job(db_pool, job_id: str) -> None:
 
 
 class TestOnComplete:
-    """on_complete()를 raw_result(LLM 결과 문자열)와 함께 호출해 INSERT 검증."""
+    """on_complete()를 raw_result(LLM 결과 문자열)와 함께 호출해 INSERT 검증.
+    score는 LLM 출력 무시 + 코드가 signals + sentiment + macro_verdict로 산정.
+    """
 
     @pytest.mark.asyncio
     async def test_crew_001_full_insert(self, db_pool, crew_with_db):
-        """CREW-001: 정상 raw_result → recommendations INSERT."""
+        """CREW-001: 정상 raw_result → recommendations INSERT (점수 코드 산정)."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        # 005930: 강한 supply(consec 5 + surge) + technical → buy_hedge 구간
+        await SignalFactory.create(
+            db_pool, target, "005930",
+            consecutive_buy_days=5, agency_net_buy=1_000_000_000,
+            foreign_net_buy=500_000_000,
+            one_day_net_buy=15_000_000_000, three_day_avg_net_buy=5_000_000_000,
+            volume_ratio=4.0, rsi=55.0, ma_alignment="bullish",
+            bollinger_position=0.5, trading_value=50_000_000_000,
+        )
+        # 000660: 약한 supply(consec 2) + 평범한 technical → watch 구간
+        await SignalFactory.create(
+            db_pool, target, "000660",
+            consecutive_buy_days=2, agency_net_buy=500_000_000,
+            foreign_net_buy=200_000_000,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
         raw = json.dumps([
             {"ticker": "005930", "name": "삼성전자",
-             "recommendation_type": "buy_hedge", "score": 85,
-             "reason_supply": "기관 5일 매수", "reason_news": "호재",
-             "reason_macro": "DXY 하락", "estimated_avg_price": 72000},
+             "sentiment": "positive", "macro_verdict": "favorable",
+             "reason_supply": "기관 5일 매수 + 급등 모멘텀",
+             "reason_news": "호재", "reason_macro": "DXY 하락",
+             "estimated_avg_price": 72000},
             {"ticker": "000660", "name": "SK하이닉스",
-             "recommendation_type": "watch", "score": 60,
-             "reason_supply": "외국인 순매수", "reason_news": None,
-             "reason_macro": None, "estimated_avg_price": None},
+             "sentiment": "positive", "macro_verdict": "favorable",
+             "reason_supply": "외국인 순매수 약함",
+             "reason_news": None, "reason_macro": None,
+             "estimated_avg_price": None},
         ])
         crew = Crew(job_id="00000000-0000-0000-0000-000000000001")
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(raw, {
-            "target_date": "2026-04-28",
+            "target_date": target.isoformat(),
             "target_trading_date": "2026-04-29",
         })
         assert result["recommendation_count"] == 2
         assert result["has_buy_hedge"] is True
         assert result["has_watch"] is True
-        assert result["has_exit_alert"] is False
-
-        async with db_pool.acquire() as conn:
-            count = await conn.fetchval("SELECT COUNT(*) FROM recommendations")
-        assert count == 2
 
     @pytest.mark.asyncio
-    async def test_crew_002_max_5_items(self, db_pool, crew_with_db):
-        """CREW-002: 5종목 한도 — parser는 5개를 그대로 받아 INSERT한다(한도는 LLM prompt 책임)."""
+    async def test_crew_002_holding_items_all_inserted(self, db_pool, crew_with_db):
+        """CREW-002: 보유 종목 5개 — score 낮아도 exit_alert로 모두 INSERT."""
+        from tests.factories import HoldingFactory
+        target = date(2026, 4, 28)
+        tickers = [f"00593{i}" for i in range(5)]
+        for t in tickers:
+            await HoldingFactory.create(db_pool, ticker=t)
         Crew = crew_with_db
+        # signals row 없음 + sentiment 부정 → 낮은 score → 보유 종목이므로 exit_alert로 들어감
         items = [
-            {"ticker": f"00593{i}", "recommendation_type": "watch", "score": 60}
-            for i in range(5)
+            {"ticker": t, "sentiment": "negative", "macro_verdict": "unfavorable"}
+            for t in tickers
         ]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         assert result["recommendation_count"] == 5
+        assert result["has_exit_alert"] is True
 
     @pytest.mark.asyncio
     async def test_crew_003_buy_hedge_score_range(self, db_pool, crew_with_db):
-        """CREW-003: score 70+ 추천 종목 INSERT 가능."""
+        """CREW-003: signals 강 + sentiment 강긍정 → score >= 70 buy_hedge."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "005930",
+            consecutive_buy_days=5, agency_net_buy=2_000_000_000,
+            foreign_net_buy=1_000_000_000,
+            one_day_net_buy=20_000_000_000, volume_ratio=4.0, rsi=55.0,
+            ma_alignment="bullish", bollinger_position=0.5,
+            trading_value=100_000_000_000,
+        )
         Crew = crew_with_db
-        items = [{"ticker": "005930", "recommendation_type": "buy_hedge", "score": 88}]
+        items = [{"ticker": "005930", "sentiment": "strongly_positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         assert result["has_buy_hedge"] is True
         async with db_pool.acquire() as conn:
             score = await conn.fetchval(
                 "SELECT score FROM recommendations WHERE ticker='005930'"
             )
-        assert score == 88
+        assert score >= 70
 
     @pytest.mark.asyncio
     async def test_crew_004_watch_score_range(self, db_pool, crew_with_db):
-        """CREW-004: watch 단계 score 50~69."""
+        """CREW-004: signals 중 + sentiment 긍정 → score 50~69 watch."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "005930",
+            consecutive_buy_days=2, agency_net_buy=300_000_000,
+            foreign_net_buy=100_000_000,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
-        items = [{"ticker": "005930", "recommendation_type": "watch", "score": 60}]
+        items = [{"ticker": "005930", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         assert result["has_watch"] is True
+        async with db_pool.acquire() as conn:
+            score = await conn.fetchval(
+                "SELECT score FROM recommendations WHERE ticker='005930'"
+            )
+        assert 50 <= score < 70
 
     @pytest.mark.asyncio
     async def test_crew_005_exit_alert(self, db_pool, crew_with_db):
-        """CREW-005: exit_alert 단계 INSERT 가능 (실제 보유 종목 한정 책임은 LLM)."""
+        """CREW-005: 보유 + signals 없음/약 + 부정 → score<50 exit_alert."""
         from tests.factories import HoldingFactory
         await HoldingFactory.create(db_pool, ticker="005930")
         Crew = crew_with_db
-        items = [{"ticker": "005930", "recommendation_type": "exit_alert", "score": 30}]
+        items = [{"ticker": "005930", "sentiment": "negative",
+                  "macro_verdict": "unfavorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
@@ -177,17 +231,37 @@ class TestOnComplete:
 
     @pytest.mark.asyncio
     async def test_crew_006_buy_hedge_estimated_avg_price(self, db_pool, crew_with_db):
-        """CREW-006: 매수 헬지 estimated_avg_price 저장 + 다른 단계는 None."""
+        """CREW-006: buy_hedge일 때만 estimated_avg_price 저장, 그 외는 NULL 강제."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        # 005930 → buy_hedge (강한 신호 + 긍정)
+        await SignalFactory.create(
+            db_pool, target, "005930",
+            consecutive_buy_days=5, agency_net_buy=2_000_000_000,
+            foreign_net_buy=1_000_000_000,
+            one_day_net_buy=20_000_000_000, volume_ratio=4.0, rsi=55.0,
+            ma_alignment="bullish", bollinger_position=0.5,
+            trading_value=100_000_000_000,
+        )
+        # 000660 → watch (중간 신호)
+        await SignalFactory.create(
+            db_pool, target, "000660",
+            consecutive_buy_days=2, agency_net_buy=300_000_000,
+            foreign_net_buy=100_000_000,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
         items = [
-            {"ticker": "005930", "recommendation_type": "buy_hedge",
-             "score": 80, "estimated_avg_price": 72000},
-            {"ticker": "000660", "recommendation_type": "watch", "score": 60},
+            {"ticker": "005930", "sentiment": "strongly_positive",
+             "macro_verdict": "favorable", "estimated_avg_price": 72000},
+            {"ticker": "000660", "sentiment": "positive",
+             "macro_verdict": "favorable", "estimated_avg_price": 99999},
         ]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         async with db_pool.acquire() as conn:
             buy = await conn.fetchval(
@@ -197,18 +271,26 @@ class TestOnComplete:
                 "SELECT estimated_avg_price FROM recommendations WHERE ticker='000660'"
             )
         assert buy == Decimal("72000")
-        assert watch is None
+        assert watch is None  # watch는 LLM이 넣어도 코드가 NULL로 강제
 
     @pytest.mark.asyncio
     async def test_crew_009_inserts_use_job_id(self, db_pool, crew_with_db):
         """CREW-009: 저장 시 crew.job_id 반영."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "005930", consecutive_buy_days=3,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
         job_id = "11111111-1111-1111-1111-111111111111"
-        items = [{"ticker": "005930", "recommendation_type": "watch", "score": 55}]
+        items = [{"ticker": "005930", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew(job_id=job_id)
         await _seed_job(db_pool, crew.job_id)
         crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         async with db_pool.acquire() as conn:
             row = await conn.fetchval(
@@ -228,15 +310,16 @@ class TestOnComplete:
         assert result["has_buy_hedge"] is False
 
 
-class TestOnCompleteEnforceClassification:
-    """on_complete() 분류 후처리 강제 — LLM 룰 일탈 방어."""
+class TestOnCompleteClassification:
+    """on_complete() 분류 — 코드가 signals + sentiment + macro_verdict로 score 산정 + 분류."""
 
     @pytest.mark.asyncio
     async def test_low_score_new_candidate_excluded(self, db_pool, crew_with_db):
         """신규 후보(보유 X) score<50 → INSERT 안 함."""
         Crew = crew_with_db
-        # 005930은 보유 안 함 (HoldingFactory 미사용). LLM이 buy_hedge로 잘못 분류해도 제외.
-        items = [{"ticker": "999111", "recommendation_type": "buy_hedge", "score": 30}]
+        # signals row 없음 + sentiment 부정 → 낮은 score, 보유 아니므로 제외
+        items = [{"ticker": "999111", "sentiment": "negative",
+                  "macro_verdict": "unfavorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
@@ -246,11 +329,13 @@ class TestOnCompleteEnforceClassification:
 
     @pytest.mark.asyncio
     async def test_low_score_holding_forced_exit_alert(self, db_pool, crew_with_db):
-        """보유 종목 score<50 → LLM이 watch로 잘못 분류해도 exit_alert 강제."""
+        """보유 종목 score<50 → exit_alert."""
         from tests.factories import HoldingFactory
         await HoldingFactory.create(db_pool, ticker="005930")
         Crew = crew_with_db
-        items = [{"ticker": "005930", "recommendation_type": "watch", "score": 32}]
+        # signals 없음 + sentiment 부정 → score 낮고 보유 → exit_alert
+        items = [{"ticker": "005930", "sentiment": "negative",
+                  "macro_verdict": "unfavorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
@@ -265,16 +350,25 @@ class TestOnCompleteEnforceClassification:
 
     @pytest.mark.asyncio
     async def test_high_score_forced_buy_hedge(self, db_pool, crew_with_db):
-        """score≥70 → LLM이 exit_alert로 잘못 분류해도 buy_hedge 강제."""
-        from tests.factories import HoldingFactory
+        """signals 강 + sentiment 강긍정 → score >= 70 → buy_hedge (보유 여부 무관)."""
+        from tests.factories import HoldingFactory, SignalFactory
+        target = date(2026, 4, 28)
         await HoldingFactory.create(db_pool, ticker="000660")
+        await SignalFactory.create(
+            db_pool, target, "000660",
+            consecutive_buy_days=5, agency_net_buy=2_000_000_000,
+            foreign_net_buy=1_000_000_000,
+            one_day_net_buy=20_000_000_000, volume_ratio=4.0, rsi=55.0,
+            ma_alignment="bullish", bollinger_position=0.5,
+            trading_value=100_000_000_000,
+        )
         Crew = crew_with_db
-        # LLM이 73점에 exit_alert 분류 (5차 검증에서 실제 발생한 룰 위반)
-        items = [{"ticker": "000660", "recommendation_type": "exit_alert", "score": 73}]
+        items = [{"ticker": "000660", "sentiment": "strongly_positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         assert result["has_buy_hedge"] is True
         async with db_pool.acquire() as conn:
@@ -285,13 +379,23 @@ class TestOnCompleteEnforceClassification:
 
     @pytest.mark.asyncio
     async def test_mid_score_forced_watch(self, db_pool, crew_with_db):
-        """50≤score<70 → 자동 watch (보유 무관)."""
+        """50≤score<70 → watch (보유 무관)."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "999222",
+            consecutive_buy_days=2, agency_net_buy=300_000_000,
+            foreign_net_buy=100_000_000,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
-        items = [{"ticker": "999222", "recommendation_type": "buy_hedge", "score": 55}]
+        items = [{"ticker": "999222", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         result = crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         assert result["has_watch"] is True
         async with db_pool.acquire() as conn:
@@ -305,6 +409,13 @@ class TestOnCompleteEnforceClassification:
         self, db_pool, crew_with_db, monkeypatch
     ):
         """LLM이 name 누락 → KIS API로 즉시 채워서 INSERT."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "018880", consecutive_buy_days=3,
+            volume_ratio=1.0, rsi=55.0, ma_alignment="neutral",
+            bollinger_position=0.5, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
 
         from crews.stock_recommendation import crew as crew_mod
@@ -314,11 +425,12 @@ class TestOnCompleteEnforceClassification:
 
         monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _fake_kis)
 
-        items = [{"ticker": "018880", "recommendation_type": "watch", "score": 60}]
+        items = [{"ticker": "018880", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         async with db_pool.acquire() as conn:
             name = await conn.fetchval(
@@ -329,6 +441,16 @@ class TestOnCompleteEnforceClassification:
     @pytest.mark.asyncio
     async def test_llm_name_overrides_kis(self, db_pool, crew_with_db, monkeypatch):
         """LLM이 name 명시 → KIS 호출 안 함."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "005930",
+            consecutive_buy_days=5, agency_net_buy=2_000_000_000,
+            foreign_net_buy=1_000_000_000,
+            one_day_net_buy=20_000_000_000, volume_ratio=4.0, rsi=55.0,
+            ma_alignment="bullish", bollinger_position=0.5,
+            trading_value=100_000_000_000,
+        )
         Crew = crew_with_db
         from crews.stock_recommendation import crew as crew_mod
         kis_calls = {"count": 0}
@@ -340,11 +462,11 @@ class TestOnCompleteEnforceClassification:
         monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _spy_kis)
 
         items = [{"ticker": "005930", "name": "삼성전자",
-                  "recommendation_type": "buy_hedge", "score": 80}]
+                  "sentiment": "strongly_positive", "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         async with db_pool.acquire() as conn:
             name = await conn.fetchval(
@@ -356,6 +478,12 @@ class TestOnCompleteEnforceClassification:
     @pytest.mark.asyncio
     async def test_name_null_when_kis_fails(self, db_pool, crew_with_db, monkeypatch):
         """LLM 누락 + KIS 실패(None) → name=NULL INSERT (notifier가 holdings 폴백 시도)."""
+        from tests.factories import SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "018880", consecutive_buy_days=2,
+            volume_ratio=1.0, trading_value=20_000_000_000,
+        )
         Crew = crew_with_db
         from crews.stock_recommendation import crew as crew_mod
 
@@ -364,11 +492,12 @@ class TestOnCompleteEnforceClassification:
 
         monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", _fail_kis)
 
-        items = [{"ticker": "018880", "recommendation_type": "watch", "score": 60}]
+        items = [{"ticker": "018880", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
         crew = Crew()
         await _seed_job(db_pool, crew.job_id)
         crew.on_complete(json.dumps(items), {
-            "target_date": "2026-04-28", "target_trading_date": "2026-04-29",
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
         })
         async with db_pool.acquire() as conn:
             name = await conn.fetchval(
@@ -491,6 +620,29 @@ class TestTools:
         parsed = _peel_tool_output(out)
         assert parsed["count"] == 2
         assert set(parsed["tickers"]) == {"005930", "000660"}
+
+    @pytest.mark.asyncio
+    async def test_holdings_query_filters_etf(self, db_pool, reset_psycopg_pool):
+        """HoldingsQueryTool은 single_stock만 반환 — ETF/ETN은 일일 사이클에서 제외."""
+        from tests.factories import HoldingFactory
+        await HoldingFactory.create(db_pool, ticker="005930",
+                                     instrument_type="single_stock")
+        await HoldingFactory.create(db_pool, ticker="379800",
+                                     name="KODEX 미국S&P500",
+                                     instrument_type="index_etf")
+        await HoldingFactory.create(db_pool, ticker="091160",
+                                     name="KODEX 반도체",
+                                     instrument_type="sector_etf")
+
+        from crews.stock_recommendation.tools import HoldingsQueryTool
+        tool = HoldingsQueryTool()
+        out = tool._run()
+        parsed = _peel_tool_output(out)
+        assert parsed["count"] == 1
+        assert set(parsed["tickers"]) == {"005930"}
+        # ETF 둘은 결과에 없어야 함
+        assert "379800" not in parsed["tickers"]
+        assert "091160" not in parsed["tickers"]
 
     @pytest.mark.asyncio
     async def test_crew_e002_tool_db_failure_returns_error_string(

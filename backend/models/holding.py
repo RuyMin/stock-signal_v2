@@ -25,3 +25,6 @@ class Holding(Base):
     name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     avg_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     added_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="single_stock"
+    )
