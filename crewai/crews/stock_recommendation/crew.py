@@ -86,6 +86,10 @@ class StockRecommendationCrew(BaseCrew):
                     tickers = [it["ticker"] for it in items]
                     signal_rows = _fetch_signal_rows(cur, tickers, target_date)
 
+                    # 알려진 이름 캐시: holdings + 최근 recommendations에서 ticker→name
+                    # KIS API 5xx 등 실패 시 fallback. NULL row 방지.
+                    known_names = _fetch_known_names(cur, tickers)
+
                     for it in items:
                         ticker = it["ticker"]
                         is_holding = ticker in holdings_set
@@ -97,10 +101,17 @@ class StockRecommendationCrew(BaseCrew):
                             signal_rows.get(ticker), sentiment, macro_verdict
                         )
 
-                        # name 보강: LLM 명시 우선 → KIS API 즉시 조회 → NULL fallback
+                        # name 보강: LLM 명시 → KIS API 조회 → 알려진 이름 캐시 → NULL
                         rec_name = (it.get("name") or "").strip() or None
                         if rec_name is None:
                             rec_name = kis_api.fetch_ticker_name(ticker)
+                        if rec_name is None:
+                            rec_name = known_names.get(ticker)
+                            if rec_name:
+                                logger.info(
+                                    "ticker_name_from_cache",
+                                    ticker=ticker, name=rec_name,
+                                )
 
                         # score 기반 분류
                         if score >= 70:
@@ -165,6 +176,37 @@ class StockRecommendationCrew(BaseCrew):
             "has_watch": has_watch,
             "has_exit_alert": has_exit_alert,
         }
+
+
+def _fetch_known_names(cur, tickers: list[str]) -> dict[str, str]:
+    """ticker → 알려진 이름. holdings + 최근 recommendations에서 NULL 아닌 이름 수집.
+    KIS API 실패 시 fallback. 같은 ticker에 holdings 이름과 recommendations 이름이
+    다르면 holdings가 우선 (사용자가 명시한 이름).
+    """
+    if not tickers:
+        return {}
+    result: dict[str, str] = {}
+    # recommendations 최근 이름 (오래된 것부터 채워 → holdings로 덮어쓰기)
+    cur.execute(
+        """
+        SELECT DISTINCT ON (ticker) ticker, name
+        FROM recommendations
+        WHERE ticker = ANY(%s) AND name IS NOT NULL
+        ORDER BY ticker, created_at DESC
+        """,
+        (tickers,),
+    )
+    for r in cur.fetchall():
+        result[r[0]] = r[1]
+    # holdings 이름 (우선 적용)
+    cur.execute(
+        "SELECT DISTINCT ON (ticker) ticker, name FROM holdings "
+        "WHERE ticker = ANY(%s) AND name IS NOT NULL ORDER BY ticker, added_at DESC",
+        (tickers,),
+    )
+    for r in cur.fetchall():
+        result[r[0]] = r[1]
+    return result
 
 
 def _fetch_signal_rows(cur, tickers: list[str], target_date: date_type) -> dict[str, dict]:

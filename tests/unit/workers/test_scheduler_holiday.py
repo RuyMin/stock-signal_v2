@@ -207,3 +207,50 @@ class TestTriggerPremarket:
         _, payload = sent[0]
         assert payload["target_date"] == "2026-05-01"  # 직전 금요일
         assert payload["target_trading_date"] == "2026-05-04"
+
+
+class TestTriggerWeeklyMacro:
+    """매주 월요일 07:00 KST. 월요일이 휴장이면 다음 거래일로 시프트."""
+
+    @pytest.mark.asyncio
+    async def test_monday_publishes_weekly_macro(self, monkeypatch):
+        from freezegun import freeze_time
+        import main as sched
+        sent = _patch_producer(monkeypatch)
+
+        # 2026-05-04 월요일 KST 07:00
+        with freeze_time(_kst(2026, 5, 4, 7, 0)):
+            await sched.trigger_weekly_macro()
+
+        assert len(sent) == 1
+        topic, payload = sent[0]
+        assert topic == "stock.weekly_macro.requested"
+        assert payload["mode"] == "weekly_macro"
+        assert payload["target_date"] == "2026-05-04"
+
+    @pytest.mark.asyncio
+    async def test_holiday_monday_shifts_to_next_trading_day(self, monkeypatch):
+        """월요일이 휴장이면 다음 거래일로 시프트."""
+        from freezegun import freeze_time
+        import main as sched
+        sent = _patch_producer(monkeypatch)
+
+        # 가상의 월요일 휴장 시뮬: is_market_open을 monkeypatch로 강제
+        # 2026-08-17(월)이 광복절 대체휴일이라 가정 (실제 holidays 라이브러리 의존)
+        # 안정적인 검증을 위해 직접 is_market_open mock
+        original_is_market_open = sched.is_market_open
+
+        def fake_is_market_open(d):
+            if d == date(2026, 5, 4):  # 월
+                return False
+            return original_is_market_open(d)
+
+        monkeypatch.setattr(sched, "is_market_open", fake_is_market_open)
+
+        with freeze_time(_kst(2026, 5, 4, 7, 0)):
+            await sched.trigger_weekly_macro()
+
+        assert len(sent) == 1
+        _, payload = sent[0]
+        # 5/4 mock 휴장 + 5/5 어린이날(실제 KR holiday) → 5/6 수요일로 시프트
+        assert payload["target_date"] == "2026-05-06"

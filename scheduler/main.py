@@ -23,6 +23,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 KAFKA_BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC_OUT = "stock.data.requested"
+TOPIC_OUT_WEEKLY = "stock.weekly_macro.requested"
+
 
 def _env_int(name: str, default: int) -> int:
     """빈 문자열도 default로 폴백 (docker compose가 unset env를 ""로 전달하기 때문)."""
@@ -36,6 +38,8 @@ INTRADAY_HOUR = _env_int("SCHEDULE_INTRADAY_HOUR", 16)
 INTRADAY_MINUTE = _env_int("SCHEDULE_INTRADAY_MINUTE", 30)
 PREMARKET_HOUR = _env_int("SCHEDULE_PREMARKET_HOUR", 6)
 PREMARKET_MINUTE = _env_int("SCHEDULE_PREMARKET_MINUTE", 30)
+WEEKLY_MACRO_HOUR = _env_int("SCHEDULE_WEEKLY_MACRO_HOUR", 7)
+WEEKLY_MACRO_MINUTE = _env_int("SCHEDULE_WEEKLY_MACRO_MINUTE", 0)
 
 TZ_KST = ZoneInfo("Asia/Seoul")
 SERVICE_NAME = "scheduler"
@@ -106,6 +110,13 @@ async def _publish(payload: dict) -> None:
     logger.info("trigger_published", topic=TOPIC_OUT, mode=payload.get("mode"))
 
 
+async def _publish_to(topic: str, payload: dict) -> None:
+    """임의 토픽 발행 — weekly_macro 등 신규 토픽용."""
+    assert producer is not None
+    await producer.send_and_wait(topic, json.dumps(payload, default=str).encode("utf-8"))
+    logger.info("trigger_published", topic=topic, mode=payload.get("mode"))
+
+
 async def trigger_intraday() -> None:
     """KST 16:30 — D일이 거래일이면 signals 수집 트리거."""
     today_kst = datetime.now(TZ_KST).date()
@@ -173,6 +184,46 @@ async def trigger_premarket() -> None:
         structlog.contextvars.unbind_contextvars("job_id")
 
 
+async def trigger_weekly_macro() -> None:
+    """매주 월요일 07:00 KST. 월요일이 휴장이면 다음 거래일로 시프트.
+
+    etf-and-weekly-macro spec — ETF 보유자에게 주간 매크로 요약 + 우호도 메시지.
+    오늘이 휴장이면 그 주 안에서 다음 거래일까지 최대 5일 탐색 후 publish.
+    """
+    today_kst = datetime.now(TZ_KST).date()
+    target = today_kst
+    days_searched = 0
+    while not is_market_open(target):
+        target += timedelta(days=1)
+        days_searched += 1
+        if days_searched > 5:
+            logger.warning(
+                "weekly_macro_skip_no_trading_day_in_week",
+                today=today_kst.isoformat(),
+            )
+            return
+    job_id = str(uuid.uuid4())
+    structlog.contextvars.bind_contextvars(job_id=job_id)
+    try:
+        logger.info(
+            "weekly_macro_triggered",
+            today=today_kst.isoformat(),
+            target_date=target.isoformat(),
+            shifted=target != today_kst,
+        )
+        await _publish_to(
+            TOPIC_OUT_WEEKLY,
+            {
+                "job_id": job_id,
+                "mode": "weekly_macro",
+                "target_date": target.isoformat(),
+                "triggered_at": datetime.utcnow().isoformat(),
+            },
+        )
+    finally:
+        structlog.contextvars.unbind_contextvars("job_id")
+
+
 async def main() -> None:
     setup_logging()
     global producer
@@ -182,6 +233,7 @@ async def main() -> None:
         "startup_complete",
         intraday=f"{INTRADAY_HOUR:02d}:{INTRADAY_MINUTE:02d} KST",
         premarket=f"{PREMARKET_HOUR:02d}:{PREMARKET_MINUTE:02d} KST",
+        weekly_macro=f"Mon {WEEKLY_MACRO_HOUR:02d}:{WEEKLY_MACRO_MINUTE:02d} KST",
     )
 
     scheduler = AsyncIOScheduler(timezone=TZ_KST)
@@ -195,6 +247,17 @@ async def main() -> None:
         trigger_premarket,
         CronTrigger(hour=PREMARKET_HOUR, minute=PREMARKET_MINUTE, timezone=TZ_KST),
         id="daily-premarket-trigger",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        trigger_weekly_macro,
+        CronTrigger(
+            day_of_week="mon",
+            hour=WEEKLY_MACRO_HOUR,
+            minute=WEEKLY_MACRO_MINUTE,
+            timezone=TZ_KST,
+        ),
+        id="weekly-macro-trigger",
         replace_existing=True,
     )
     scheduler.start()

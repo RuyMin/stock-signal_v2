@@ -477,7 +477,7 @@ class TestOnCompleteClassification:
 
     @pytest.mark.asyncio
     async def test_name_null_when_kis_fails(self, db_pool, crew_with_db, monkeypatch):
-        """LLM 누락 + KIS 실패(None) → name=NULL INSERT (notifier가 holdings 폴백 시도)."""
+        """LLM 누락 + KIS 실패(None) + 알려진 이름 없음 → name=NULL INSERT."""
         from tests.factories import SignalFactory
         target = date(2026, 4, 28)
         await SignalFactory.create(
@@ -504,6 +504,75 @@ class TestOnCompleteClassification:
                 "SELECT name FROM recommendations WHERE ticker='018880'"
             )
         assert name is None
+
+    @pytest.mark.asyncio
+    async def test_name_falls_back_to_known_recommendations(
+        self, db_pool, crew_with_db, monkeypatch
+    ):
+        """LLM 누락 + KIS 실패 → 과거 recommendations에서 알려진 name 캐시 사용."""
+        from tests.factories import RecommendationFactory, SignalFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "093370", consecutive_buy_days=3,
+            volume_ratio=1.0, trading_value=20_000_000_000,
+        )
+        # 과거 다른 날짜에 동일 ticker로 이름이 정상 저장된 경험 있음
+        await RecommendationFactory.create(
+            db_pool, date(2026, 4, 20), date(2026, 4, 21),
+            ticker="093370", name="후성 보통주",
+            recommendation_type="watch", score=55,
+        )
+        Crew = crew_with_db
+        from crews.stock_recommendation import crew as crew_mod
+        monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", lambda t: None)
+
+        items = [{"ticker": "093370", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        crew.on_complete(json.dumps(items), {
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
+        })
+        async with db_pool.acquire() as conn:
+            name = await conn.fetchval(
+                "SELECT name FROM recommendations WHERE ticker='093370' "
+                "AND target_trading_date='2026-04-29'"
+            )
+        assert name == "후성 보통주"
+
+    @pytest.mark.asyncio
+    async def test_name_falls_back_to_holdings_when_no_recs(
+        self, db_pool, crew_with_db, monkeypatch
+    ):
+        """LLM 누락 + KIS 실패 + 과거 recs 없음 → holdings에 알려진 name 사용."""
+        from tests.factories import HoldingFactory, SignalFactory, UserFactory
+        target = date(2026, 4, 28)
+        await SignalFactory.create(
+            db_pool, target, "003690", consecutive_buy_days=2,
+            volume_ratio=1.0, trading_value=20_000_000_000,
+        )
+        user = await UserFactory.create(db_pool, chat_id=999, status="active")
+        await HoldingFactory.create(
+            db_pool, ticker="003690", name="코리안리재보험보통주",
+            user_id=user["id"], chat_id=999,
+        )
+        Crew = crew_with_db
+        from crews.stock_recommendation import crew as crew_mod
+        monkeypatch.setattr(crew_mod.kis_api, "fetch_ticker_name", lambda t: None)
+
+        items = [{"ticker": "003690", "sentiment": "positive",
+                  "macro_verdict": "favorable"}]
+        crew = Crew()
+        await _seed_job(db_pool, crew.job_id)
+        crew.on_complete(json.dumps(items), {
+            "target_date": target.isoformat(), "target_trading_date": "2026-04-29",
+        })
+        async with db_pool.acquire() as conn:
+            name = await conn.fetchval(
+                "SELECT name FROM recommendations WHERE ticker='003690' "
+                "AND target_trading_date='2026-04-29'"
+            )
+        assert name == "코리안리재보험보통주"
 
 
 # ─── Tool 단위 테스트 ──────────────────────────────────────────────

@@ -393,6 +393,66 @@ class TestIsolation:
         assert {s["chat_id"] for s in bot.sent} == {"11111111", "33333333"}
 
 
+class TestLatestJobOnly:
+    """같은 target_trading_date에 여러 job이 있으면 가장 최근 job_id row만 발송."""
+
+    @pytest.mark.asyncio
+    async def test_only_latest_job_used(self, db_pool):
+        from datetime import datetime, timezone
+        from uuid import UUID
+
+        await UserFactory.create(db_pool, chat_id=11111111, status="active")
+        target = date(2026, 4, 29)
+
+        old_job = UUID("11111111-1111-1111-1111-111111111111")
+        new_job = UUID("22222222-2222-2222-2222-222222222222")
+
+        # jobs FK 충족용 minimal job rows
+        async with db_pool.acquire() as conn:
+            for jid in (old_job, new_job):
+                await conn.execute(
+                    "INSERT INTO jobs (id, job_type, status) VALUES ($1::uuid, 'test', 'completed')",
+                    str(jid),
+                )
+
+        # 오래된 job: 005930 score=85
+        await RecommendationFactory.create(
+            db_pool, date(2026, 4, 28), target,
+            ticker="005930", recommendation_type="buy_hedge", score=85,
+            job_id=old_job,
+            created_at=datetime(2026, 4, 28, 10, 0, tzinfo=timezone.utc),
+        )
+        # 최신 job: 000660 score=72 (005930은 포함 안 함 → 발송 메시지에 005930 없어야)
+        await RecommendationFactory.create(
+            db_pool, date(2026, 4, 28), target,
+            ticker="000660", recommendation_type="buy_hedge", score=72,
+            job_id=new_job,
+            created_at=datetime(2026, 4, 28, 22, 0, tzinfo=timezone.utc),
+        )
+
+        from processor import notify
+        bot = FakeBot()
+        await notify(db_pool, bot, target)
+        text = bot.sent[0]["text"]
+        assert "000660" in text
+        assert "005930" not in text
+
+    @pytest.mark.asyncio
+    async def test_null_job_id_still_works(self, db_pool):
+        """job_id NULL인 row만 있을 때도 정상 발송 (기존 동작 유지)."""
+        await UserFactory.create(db_pool, chat_id=11111111, status="active")
+        target = date(2026, 4, 29)
+        await RecommendationFactory.create(
+            db_pool, date(2026, 4, 28), target, ticker="005930",
+        )
+
+        from processor import notify
+        bot = FakeBot()
+        result = await notify(db_pool, bot, target)
+        assert result["sent_count"] == 1
+        assert "005930" in bot.sent[0]["text"]
+
+
 class TestErrors:
     @pytest.mark.asyncio
     async def test_wrk_e006_invalid_bot_token(self, db_pool):

@@ -143,3 +143,17 @@ CREATE TABLE IF NOT EXISTS recommendations (
 CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(date DESC);
 CREATE INDEX IF NOT EXISTS idx_recommendations_ticker ON recommendations(ticker);
 CREATE INDEX IF NOT EXISTS idx_recommendations_type ON recommendations(date, recommendation_type);
+
+-- ─── 도메인: 주간 매크로 리포트 (etf-and-weekly-macro spec) ────
+
+CREATE TABLE IF NOT EXISTS weekly_macro_reports (
+    id              BIGSERIAL PRIMARY KEY,
+    week_start      DATE         NOT NULL,
+    week_end        DATE         NOT NULL,
+    job_id          UUID,
+    macro_summary   TEXT,
+    macro_values    JSONB,
+    etf_evaluations JSONB,
+    generated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE(week_start)
+);

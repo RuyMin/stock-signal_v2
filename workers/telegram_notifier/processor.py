@@ -38,12 +38,22 @@ async def notify(
     RetryAfter는 별도 — 호출자(main.py)가 sleep 후 재처리하도록 그대로 raise.
     """
     async with pool.acquire() as conn:
+        # 같은 target_trading_date에 여러 job(재실행/manual trigger)이 있으면 **최신 job만** 사용.
+        # 과거 job row는 audit 보존, 사용자 알림 중복 방지.
         rec_rows = await conn.fetch(
             """
+            WITH latest_job AS (
+                SELECT job_id
+                FROM recommendations
+                WHERE target_trading_date = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
             SELECT date, ticker, name, recommendation_type, score,
                    reason_supply, reason_news, reason_macro, estimated_avg_price
             FROM recommendations
             WHERE target_trading_date = $1
+              AND job_id IS NOT DISTINCT FROM (SELECT job_id FROM latest_job)
             ORDER BY
                 CASE recommendation_type
                     WHEN 'buy_hedge' THEN 1

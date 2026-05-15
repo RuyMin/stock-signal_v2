@@ -107,7 +107,7 @@ services:
       - -c
       - |
         pip install -q --no-cache-dir pytest pytest-asyncio asyncpg respx freezegun \
-        && python -m pytest tests/unit/workers/test_telegram_notifier.py -v --tb=short --strict-markers
+        && python -m pytest tests/unit/workers/test_telegram_notifier.py tests/unit/workers/test_weekly_notifier.py -v --tb=short --strict-markers
 
   telegram-listener-tests:
     build:

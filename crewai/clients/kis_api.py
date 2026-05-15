@@ -115,25 +115,52 @@ class _KisClient:
         token = self._ensure_token()
         if not token:
             return None
-        try:
-            resp = self._get_http().get(
-                f"{API_BASE}{API_SEARCH_STOCK_INFO}",
-                params={"PRDT_TYPE_CD": "300", "PDNO": ticker},
-                headers={
-                    "content-type": "application/json; charset=utf-8",
-                    "authorization": f"Bearer {token}",
-                    "appkey": APP_KEY,
-                    "appsecret": APP_SECRET,
-                    "tr_id": TR_SEARCH_STOCK_INFO,
-                    "tr_cont": "",
-                    "custtype": CUSTTYPE_PERSONAL,
-                },
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "kis_fetch_ticker_name_http_error", ticker=ticker, error=str(exc)
-            )
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = self._get_http().get(
+                    f"{API_BASE}{API_SEARCH_STOCK_INFO}",
+                    params={"PRDT_TYPE_CD": "300", "PDNO": ticker},
+                    headers={
+                        "content-type": "application/json; charset=utf-8",
+                        "authorization": f"Bearer {token}",
+                        "appkey": APP_KEY,
+                        "appsecret": APP_SECRET,
+                        "tr_id": TR_SEARCH_STOCK_INFO,
+                        "tr_cont": "",
+                        "custtype": CUSTTYPE_PERSONAL,
+                    },
+                )
+                # 5xx만 재시도 — 4xx (잘못된 ticker 등)는 즉시 종료
+                if 500 <= resp.status_code < 600 and attempt < 2:
+                    logger.warning(
+                        "kis_fetch_ticker_name_retry",
+                        ticker=ticker, attempt=attempt + 1, status=resp.status_code,
+                    )
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                # 네트워크 오류는 짧게 재시도
+                if attempt < 2:
+                    logger.warning(
+                        "kis_fetch_ticker_name_retry",
+                        ticker=ticker, attempt=attempt + 1, error=str(exc),
+                    )
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                logger.warning(
+                    "kis_fetch_ticker_name_http_error", ticker=ticker, error=str(exc)
+                )
+                return None
+        else:
+            if last_exc is not None:
+                logger.warning(
+                    "kis_fetch_ticker_name_http_error", ticker=ticker, error=str(last_exc)
+                )
             return None
 
         body = resp.json()
