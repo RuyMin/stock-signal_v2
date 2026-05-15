@@ -1,0 +1,6 @@
+# Shell scripts must always be LF for Linux container execution
+*.sh text eol=lf
+
+# Dockerfiles + entrypoints
+Dockerfile text eol=lf
+entrypoint* text eol=lf
