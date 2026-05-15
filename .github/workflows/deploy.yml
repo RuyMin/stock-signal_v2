@@ -88,10 +88,16 @@ jobs:
             export IMAGE_TAG=${{ github.sha }}
             docker compose -f docker-compose.yml -f docker-compose.prod.yml \
               --env-file .env.prod pull
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-              --env-file .env.prod up -d --remove-orphans
 
-            sleep 10
+            # 1단계: 인프라(postgres/kafka/zookeeper) 먼저 띄우고 healthy 될 때까지 대기
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              --env-file .env.prod up -d --wait --wait-timeout 180 \
+              postgres zookeeper kafka
+
+            # 2단계: 앱 서비스 (kafka healthy 보장된 상태에서 시작)
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              --env-file .env.prod up -d --remove-orphans --wait --wait-timeout 180
+
             curl -fsS http://localhost:8000/health || (echo "Health check failed" && exit 1)
 
             docker image prune -f
