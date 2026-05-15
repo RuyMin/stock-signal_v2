@@ -70,3 +70,4 @@ htmlcov/
 # Claude local settings
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+infra/config/ssh-key-2026-05-15.key.pub

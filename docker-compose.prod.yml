@@ -75,8 +75,6 @@ services:
 
   postgres:
     restart: always
-    volumes:
-      - postgres_prod_data:/var/lib/postgresql/data
 
   kafka:
     restart: always
@@ -94,6 +92,3 @@ services:
     restart: always
     # 운영 시 외부 포트 차단 — SSH 터널 또는 VPN으로만 접근
     ports: !reset []
-
-volumes:
-  postgres_prod_data:

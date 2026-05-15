@@ -3,78 +3,14 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:    # 수동 트리거 (deploy만 따로 돌리고 싶을 때)
 
 env:
   REGISTRY: ghcr.io
-  #IMAGE_PREFIX: ${{ github.repository }}
   IMAGE_PREFIX: ruymin/stock-signal_v2
 
 jobs:
-  test:
-    # 임시 비활성화: CI 호스트 의존성(starlette 0.45+ Router on_startup 제거 등) 정비 전까지 skip.
-    # 컨테이너 격리(`scripts/run-unit-tests.sh`)로 로컬 단위 129/129 검증 중.
-    if: false
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: stock
-          POSTGRES_PASSWORD: codedream
-          POSTGRES_DB: stock_signal_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U stock -d stock_signal_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies (모든 모듈)
-        run: |
-          for f in backend/requirements.txt crewai/requirements.txt \
-                   workers/data_collector/requirements.txt \
-                   workers/telegram_notifier/requirements.txt \
-                   workers/telegram_listener/requirements.txt \
-                   scheduler/requirements.txt \
-                   tests/requirements.txt; do
-            [ -f "$f" ] && pip install -r "$f"
-          done
-          pip install pytest pytest-asyncio pytest-cov httpx factory-boy
-
-      - name: Run unit tests
-        env:
-          PYTHONPATH: shared:backend:crewai:scheduler:workers/data_collector:workers/telegram_notifier:workers/telegram_listener
-          DATABASE_URL: postgresql+asyncpg://stock:codedream@localhost:5432/stock_signal_test
-          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
-          OPENAI_API_KEY: test-key
-          OPENAI_MODEL_NAME: gpt-4o-mini
-          KIS_APP_KEY: test
-          KIS_APP_SECRET: test
-          KIS_BASE_URL: https://openapi.koreainvestment.com:9443
-          TELEGRAM_BOT_TOKEN: test
-          TELEGRAM_AUTHORIZED_CHAT_ID: "0"
-          VIBE_ENV: dev
-        run: |
-          if [ -d tests/unit ]; then
-            pytest tests/unit/ -v
-          else
-            echo "No tests/unit/ yet — skip"
-          fi
-
   build-and-push:
-    # 임시: CI 호스트 환경의 의존성 호환 정비 전까지 test 의존성 제거.
-    # 운영 검증은 컨테이너 격리(scripts/run-unit-tests.sh)로 로컬 수행 (단위 129/129).
-    # TODO: CI에서 컨테이너 격리 방식으로 test 재도입.
-    # needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,7 +49,7 @@ jobs:
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Dockerfile not found at ${{ matrix.context }} — skip build (해당 엔지니어 미완료)"
+            echo "Dockerfile not found at ${{ matrix.context }} — skip build"
           fi
 
       - name: Build and push (linux/arm64)
@@ -129,47 +65,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy-staging:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: ${{ vars.STAGING_ENABLED == 'true' }}    # repository variable로 켜고 끔
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Deploy to Staging via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.OCI_HOST }}
-          username: ${{ secrets.OCI_USER }}
-          key: ${{ secrets.OCI_SSH_KEY }}
-          script: |
-            set -e
-            cd /opt/vibe-staging
-            git pull origin main
-
-            echo ${{ secrets.GITHUB_TOKEN }} | \
-              docker login ghcr.io -u ruymin --password-stdin
-
-            export IMAGE_TAG=${{ github.sha }}
-            docker compose -f docker-compose.yml -f docker-compose.staging.yml \
-              --env-file .env.staging pull
-            docker compose -f docker-compose.yml -f docker-compose.staging.yml \
-              --env-file .env.staging up -d --remove-orphans
-
-            sleep 10
-            curl -fsS http://localhost:8000/health || (echo "Health check failed" && exit 1)
-
-            docker image prune -f
-            echo "Staging deploy complete: ${{ github.sha }}"
-
   deploy-prod:
     needs: build-and-push
     runs-on: ubuntu-latest
-    # staging이 활성화돼 있으면 그것을 기다리도록 설정 (선택)
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to Production via SSH
+      - name: Deploy to OCI via SSH
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.OCI_HOST }}
@@ -177,7 +79,7 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           script: |
             set -e
-            cd /opt/vibe-prod
+            cd /home/ubuntu/stock-signal
             git pull origin main
 
             echo ${{ secrets.GITHUB_TOKEN }} | \
@@ -193,4 +95,4 @@ jobs:
             curl -fsS http://localhost:8000/health || (echo "Health check failed" && exit 1)
 
             docker image prune -f
-            echo "Production deploy complete: ${{ github.sha }}"
+            echo "Deploy complete: ${{ github.sha }}"
